@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# data — too large for git
+data/movielens/
+data/index/
+data/cache/
+
+# keep config template but not personal secrets
+config.yaml

@@ -1,0 +1,15 @@
+letterboxd:
+  username: your_username
+
+tmdb:
+  api_key: your_tmdb_api_key  # free at https://www.themoviedb.org/settings/api
+
+defaults:
+  beta: 0.5    # intent vs taste balance (0=pure taste, 1=pure intent)
+  gamma: 0.6   # within intent: reference films vs mood text (0=pure mood, 1=pure refs)
+  top_n: 10    # number of results to display
+
+llm:
+  enabled: false
+  provider: ollama
+  model: llama3
