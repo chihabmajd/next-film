@@ -61,11 +61,10 @@ class TMDBClient:
         cache_path.write_text(json.dumps(details, ensure_ascii=False))
         return metadata
 
-    def get_metadata_batch(self, tmdb_ids: list[int], delay: float = 0.05) -> dict[int, FilmMetadata]:
+    def get_metadata_batch(self, tmdb_ids: list[int], delay: float = 0.025) -> dict[int, FilmMetadata]:
         results = {}
-        cache_dir = CACHE_DIR
         for tmdb_id in tmdb_ids:
-            cached = (cache_dir / f"{tmdb_id}.json").exists()
+            cached = (CACHE_DIR / f"{tmdb_id}.json").exists()
             meta = self.get_metadata(tmdb_id)
             if meta:
                 results[tmdb_id] = meta
@@ -107,7 +106,7 @@ class TMDBClient:
         director = ""
         for crew in credits.get("crew", []):
             if crew.get("job") == "Director":
-                director = crew["name"]
+                director = crew.get("name", "")
                 break
 
         cast = [m["name"] for m in credits.get("cast", [])[:5] if "name" in m]

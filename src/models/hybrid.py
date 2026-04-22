@@ -25,7 +25,15 @@ class HybridRanker:
         user_vector: np.ndarray,
         watched_tmdb_ids: set[int],
         top_n: int = 10,
+        exploration: float = 0.0,
     ) -> list[Recommendation]:
+        if exploration > 0.0:
+            noise = np.random.randn(len(query_vector)).astype(np.float32)
+            noise /= np.linalg.norm(noise)
+            q = query_vector + exploration * noise
+            norm = np.linalg.norm(q)
+            query_vector = (q / norm) if norm > 0 else query_vector
+
         # Stage 1: FAISS retrieval — fetch enough to absorb watched films
         k = 500 + len(watched_tmdb_ids)
         candidates = self.film_index.search(query_vector, k=k)

@@ -17,7 +17,7 @@ from src.models.collaborative import CollaborativeModel
 from src.models.embeddings import EmbeddingModel, FilmIndex
 from src.models.hybrid import HybridRanker, Recommendation
 from src.query.builder import QueryBuilder
-from src.scrapers.letterboxd import fetch_watched
+from src.scrapers.letterboxd import fetch_watched, load_from_export
 from src.search.film_search import FilmSearcher
 
 console = Console()
@@ -113,16 +113,29 @@ def main() -> None:
 
     defaults = config.get("defaults", {})
     top_n = defaults.get("top_n", 10)
+    exploration = float(defaults.get("exploration", 0.0))
 
     # Fetch Letterboxd history
-    username = config["letterboxd"]["username"]
-    console.print(f"\nFetching Letterboxd history for [cyan]{username}[/cyan]...")
-    try:
-        watched = fetch_watched(username)
-        console.print(f"  Found [green]{len(watched)}[/green] films.")
-    except Exception as e:
-        console.print(f"[red]Could not fetch Letterboxd data: {e}[/red]")
-        watched = []
+    lb_config = config["letterboxd"]
+    username = lb_config["username"]
+    export_dir = lb_config.get("export_dir")
+
+    if export_dir:
+        console.print(f"\nLoading Letterboxd export from [cyan]{export_dir}[/cyan]...")
+        try:
+            watched = load_from_export(export_dir)
+            console.print(f"  Loaded [green]{len(watched)}[/green] films from export.")
+        except Exception as e:
+            console.print(f"[red]Could not load export: {e}[/red]")
+            watched = []
+    else:
+        console.print(f"\nFetching Letterboxd history for [cyan]{username}[/cyan] (RSS, ~50 recent)...")
+        try:
+            watched = fetch_watched(username)
+            console.print(f"  Found [green]{len(watched)}[/green] films.")
+        except Exception as e:
+            console.print(f"[red]Could not fetch Letterboxd data: {e}[/red]")
+            watched = []
 
     # Resolve watched films to TMDB IDs
     watched_tmdb_ids: set[int] = set()
@@ -153,7 +166,7 @@ def main() -> None:
         console.print("[red]Please provide at least reference films, a mood, or have rated films on Letterboxd.[/red]")
         sys.exit(1)
 
-    # β and γ
+    # β — only ask when both taste and intent signals are present
     has_intent = bool(references or mood_text)
     if has_intent and taste_vector is not None:
         beta = max(0.0, min(1.0, FloatPrompt.ask(
@@ -161,10 +174,11 @@ def main() -> None:
             default=defaults.get("beta", 0.5),
         )))
     elif has_intent:
-        beta = 1.0  # no taste signal, pure intent
+        beta = 1.0
     else:
-        beta = 0.0  # no intent signal, pure taste
+        beta = 0.0
 
+    # γ — only ask when both reference films and mood text are provided
     gamma = defaults.get("gamma", 0.6)
     if references and mood_text:
         gamma = max(0.0, min(1.0, FloatPrompt.ask(
@@ -191,7 +205,7 @@ def main() -> None:
 
     # Recommend
     ranker = HybridRanker(film_index, cf_model, tmdb_to_ml)
-    recommendations = ranker.recommend(query_vector, user_vector, watched_tmdb_ids, top_n=top_n)
+    recommendations = ranker.recommend(query_vector, user_vector, watched_tmdb_ids, top_n=top_n, exploration=exploration)
 
     if not recommendations:
         console.print("[yellow]No recommendations found.[/yellow]")
