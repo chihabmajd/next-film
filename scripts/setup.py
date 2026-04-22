@@ -8,7 +8,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -50,10 +50,10 @@ def build_tmdb_mapping(tmdb_client: TMDBClient) -> dict[int, int]:
     links = pd.read_csv(MOVIELENS_DIR / "links.csv")
     valid = links.dropna(subset=["tmdbId"])
     valid = valid[valid["tmdbId"] != 0]
-    mapping: dict[int, int] = dict(zip(
-        valid["movieId"].astype(int).tolist(),
-        valid["tmdbId"].astype(int).tolist(),
-    ))
+    mapping: dict[int, int] = {
+        int(k): int(v)
+        for k, v in zip(valid["movieId"].tolist(), valid["tmdbId"].tolist())
+    }
 
     INDEX_DIR.mkdir(parents=True, exist_ok=True)
     mapping_path.write_text(json.dumps(mapping))
@@ -68,14 +68,18 @@ def load_movielens_base_metadata(ml_to_tmdb: dict[int, int]) -> dict[int, FilmMe
     for films where the TMDB fetch fails so they still get embedded.
     """
     movies = pd.read_csv(MOVIELENS_DIR / "movies.csv")
+    ml_ids: list[Any] = movies["movieId"].tolist()
+    raw_titles: list[Any] = movies["title"].tolist()
+    raw_genres: list[Any] = movies["genres"].tolist()
     base: dict[int, FilmMetadata] = {}
-    for row in track(movies.itertuples(index=False), description="Loading movies.csv", total=len(movies)):
-        ml_id = int(row.movieId)
-        tmdb_id = ml_to_tmdb.get(ml_id)
+    for ml_id, raw_title, raw_genre in track(
+        zip(ml_ids, raw_titles, raw_genres), description="Loading movies.csv", total=len(movies)
+    ):
+        tmdb_id = ml_to_tmdb.get(int(ml_id))
         if tmdb_id is None:
             continue
-        title, year = _parse_ml_title(str(row.title))
-        genres_raw = str(row.genres)
+        title, year = _parse_ml_title(str(raw_title))
+        genres_raw = str(raw_genre)
         genres = [] if genres_raw == "(no genres listed)" else genres_raw.split("|")
         base[tmdb_id] = FilmMetadata(
             tmdb_id=tmdb_id,
