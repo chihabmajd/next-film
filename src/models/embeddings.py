@@ -55,7 +55,6 @@ class FilmIndex:
         if query_vector.ndim == 1:
             query_vector = query_vector.reshape(1, -1)
         query_vector = np.ascontiguousarray(query_vector, dtype=np.float32)
-        # faiss stubs expose the raw SWIG C++ signature; the Python API is search(x, k)
         scores, positions = self.index.search(query_vector, k)  # type: ignore[call-arg]
         results = []
         for pos, score in zip(positions[0], scores[0]):

@@ -1,14 +1,16 @@
-"""One-time setup: download MovieLens 25M, build FAISS index, train SVD model."""
+"""One-time setup: build FAISS index and train SVD model.
 
-import io
+Place the ml-32m CSV files in data/movielens/ before running.
+Download from: https://grouplens.org/datasets/movielens/32m/
+"""
+
 import json
+import re
 import sys
-import zipfile
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import requests
 from rich.console import Console
 from rich.progress import track
 
@@ -23,35 +25,22 @@ console = Console()
 DATA_DIR = Path(__file__).parent.parent / "data"
 MOVIELENS_DIR = DATA_DIR / "movielens"
 INDEX_DIR = DATA_DIR / "index"
-MOVIELENS_URL = "https://files.grouplens.org/datasets/movielens/ml-25m.zip"
 
 
-def download_movielens() -> None:
-    if (MOVIELENS_DIR / "ratings.csv").exists():
-        console.print("[green]MovieLens already downloaded.[/green]")
+def check_movielens() -> None:
+    required = ["ratings.csv", "movies.csv", "links.csv", "tags.csv"]
+    missing = [f for f in required if not (MOVIELENS_DIR / f).exists()]
+    if not missing:
+        console.print("[green]MovieLens files found.[/green]")
         return
-
-    console.print("Downloading MovieLens 25M (~250MB)...")
-    MOVIELENS_DIR.mkdir(parents=True, exist_ok=True)
-    response = requests.get(MOVIELENS_URL, stream=True, timeout=120)
-    response.raise_for_status()
-
-    content = b""
-    total = int(response.headers.get("content-length", 0))
-    for chunk in track(response.iter_content(chunk_size=1024 * 1024), description="Downloading", total=total // (1024 * 1024)):
-        content += chunk
-
-    with zipfile.ZipFile(io.BytesIO(content)) as z:
-        for name in z.namelist():
-            filename = Path(name).name
-            if filename in ("ratings.csv", "movies.csv", "links.csv"):
-                data = z.read(name)
-                (MOVIELENS_DIR / filename).write_bytes(data)
-    console.print("[green]MovieLens downloaded.[/green]")
+    console.print(f"[red]Missing files in {MOVIELENS_DIR}: {missing}[/red]")
+    console.print("  Download ml-32m from https://grouplens.org/datasets/movielens/32m/")
+    console.print(f"  Unzip and place the CSV files in: {MOVIELENS_DIR}")
+    sys.exit(1)
 
 
 def build_tmdb_mapping(tmdb_client: TMDBClient) -> dict[int, int]:
-    """Map MovieLens movie IDs to TMDB IDs using the links.csv file."""
+    """Map MovieLens movie IDs to TMDB IDs using links.csv."""
     mapping_path = INDEX_DIR / "ml_to_tmdb.json"
     if mapping_path.exists():
         console.print("[green]MovieLens→TMDB mapping already exists.[/green]")
@@ -62,7 +51,7 @@ def build_tmdb_mapping(tmdb_client: TMDBClient) -> dict[int, int]:
     for _, row in track(links.iterrows(), description="Building ML→TMDB mapping", total=len(links)):
         ml_id = int(row["movieId"])
         tmdb_id = row.get("tmdbId")
-        if pd.notna(tmdb_id):
+        if pd.notna(tmdb_id) and int(tmdb_id) != 0:
             mapping[ml_id] = int(tmdb_id)
 
     INDEX_DIR.mkdir(parents=True, exist_ok=True)
@@ -71,9 +60,93 @@ def build_tmdb_mapping(tmdb_client: TMDBClient) -> dict[int, int]:
     return mapping
 
 
-def fetch_tmdb_metadata(tmdb_client: TMDBClient, tmdb_ids: list[int]) -> dict[int, FilmMetadata]:
-    console.print(f"Fetching TMDB metadata for {len(tmdb_ids)} films...")
-    return tmdb_client.get_metadata_batch(tmdb_ids)
+def load_movielens_base_metadata(ml_to_tmdb: dict[int, int]) -> dict[int, FilmMetadata]:
+    """Build basic FilmMetadata from movies.csv — no API calls.
+
+    Gives every film a title, year, and genres immediately. Used as fallback
+    for films where the TMDB fetch fails so they still get embedded.
+    """
+    movies = pd.read_csv(MOVIELENS_DIR / "movies.csv")
+    base: dict[int, FilmMetadata] = {}
+    for _, row in track(movies.iterrows(), description="Loading movies.csv", total=len(movies)):
+        ml_id = int(row["movieId"])
+        tmdb_id = ml_to_tmdb.get(ml_id)
+        if tmdb_id is None:
+            continue
+        title, year = _parse_ml_title(str(row["title"]))
+        genres_raw = str(row["genres"])
+        genres = [] if genres_raw == "(no genres listed)" else genres_raw.split("|")
+        base[tmdb_id] = FilmMetadata(
+            tmdb_id=tmdb_id,
+            title=title,
+            year=year,
+            genres=genres,
+        )
+    console.print(f"[green]Base metadata loaded for {len(base):,} films.[/green]")
+    return base
+
+
+def _parse_ml_title(raw: str) -> tuple[str, int]:
+    """'Toy Story (1995)' → ('Toy Story', 1995). Handles titles with parentheses."""
+    match = re.match(r"^(.+)\s*\((\d{4})\)\s*$", raw)
+    if match:
+        return match.group(1).strip(), int(match.group(2))
+    return raw.strip(), 0
+
+
+def load_movielens_tags(ml_to_tmdb: dict[int, int], top_n: int = 10) -> dict[int, list[str]]:
+    """Aggregate the most-applied user tags per film from tags.csv.
+
+    These semantic labels ("atmospheric", "thought-provoking", "based on a book")
+    are merged into film keywords before embedding to enrich content vectors,
+    especially for films with sparse TMDB metadata.
+    """
+    console.print("Loading tags.csv...")
+    tags_df = pd.read_csv(MOVIELENS_DIR / "tags.csv", usecols=["movieId", "tag"])
+    tags_df["tag"] = tags_df["tag"].str.strip().str.lower()
+    tag_counts = (
+        tags_df.groupby(["movieId", "tag"])
+        .size()
+        .reset_index(name="count")
+        .sort_values(["movieId", "count"], ascending=[True, False])
+    )
+
+    result: dict[int, list[str]] = {}
+    for ml_id, group in tag_counts.groupby("movieId"):
+        tmdb_id = ml_to_tmdb.get(int(ml_id))
+        if tmdb_id is not None:
+            result[tmdb_id] = group["tag"].head(top_n).tolist()
+
+    console.print(f"[green]Tags loaded for {len(result):,} films.[/green]")
+    return result
+
+
+def fetch_tmdb_metadata(
+    tmdb_client: TMDBClient,
+    tmdb_ids: list[int],
+    base_metadata: dict[int, FilmMetadata],
+) -> dict[int, FilmMetadata]:
+    """Fetch rich metadata from TMDB (plot, director, cast, keywords).
+
+    Films where TMDB fails fall back to base_metadata so they still get
+    embedded with at least title + year + genres from movies.csv.
+    """
+    console.print(f"Fetching TMDB metadata for {len(tmdb_ids):,} films...")
+    tmdb_results = tmdb_client.get_metadata_batch(tmdb_ids)
+    merged = {**base_metadata, **tmdb_results}  # TMDB overwrites base where available
+    fallback_count = len(tmdb_ids) - len(tmdb_results)
+    if fallback_count:
+        console.print(f"  [yellow]{fallback_count:,} films fell back to movies.csv metadata.[/yellow]")
+    return merged
+
+
+def _merge_tags(metadata: dict[int, FilmMetadata], ml_tags: dict[int, list[str]]) -> None:
+    """Extend film keywords with MovieLens user tags, skipping duplicates."""
+    for tmdb_id, tags in ml_tags.items():
+        if tmdb_id not in metadata:
+            continue
+        existing = {k.lower() for k in metadata[tmdb_id].keywords}
+        metadata[tmdb_id].keywords.extend(t for t in tags if t not in existing)
 
 
 def build_embeddings(metadata: dict[int, FilmMetadata], embedder: EmbeddingModel, film_index: FilmIndex) -> None:
@@ -84,16 +157,15 @@ def build_embeddings(metadata: dict[int, FilmMetadata], embedder: EmbeddingModel
     tmdb_ids = list(metadata.keys())
     texts = [metadata[tid].to_text_blob() for tid in tmdb_ids]
 
-    console.print(f"Embedding {len(texts)} films...")
+    console.print(f"Embedding {len(texts):,} films...")
     batch_size = 256
     all_vecs = []
     for i in track(range(0, len(texts), batch_size), description="Embedding"):
         batch = texts[i: i + batch_size]
-        vecs = embedder.encode(batch)
-        all_vecs.append(vecs)
+        all_vecs.append(embedder.encode(batch))
 
-    all_vecs = np.vstack(all_vecs)
-    film_index.build(all_vecs, tmdb_ids)
+    vectors = np.vstack(all_vecs)
+    film_index.build(vectors, tmdb_ids)
     film_index.save()
     console.print("[green]FAISS index saved.[/green]")
 
@@ -111,13 +183,19 @@ def train_svd(cf_model: CollaborativeModel) -> None:
     console.print("[green]SVD model saved.[/green]")
 
 
-def fetch_letterboxd_tmdb_ids(tmdb_client: TMDBClient, username: str) -> list[int]:
-    """Resolve Letterboxd watched films to TMDB IDs so they get embedded in the index."""
-    from src.scrapers.letterboxd import fetch_watched
+def fetch_letterboxd_tmdb_ids(tmdb_client: TMDBClient, config: dict) -> list[int]:
+    from src.scrapers.letterboxd import fetch_watched, load_from_export
+    lb_config = config["letterboxd"]
+    export_dir = lb_config.get("export_dir")
+
     try:
-        watched = fetch_watched(username)
+        if export_dir:
+            console.print(f"Loading Letterboxd export from {export_dir}...")
+            watched = load_from_export(export_dir)
+        else:
+            watched = fetch_watched(lb_config["username"])
     except Exception as e:
-        console.print(f"[yellow]Could not fetch Letterboxd history: {e}[/yellow]")
+        console.print(f"[yellow]Could not load Letterboxd history: {e}[/yellow]")
         return []
 
     tmdb_ids = []
@@ -133,23 +211,32 @@ def main() -> None:
     config_path = Path(__file__).parent.parent / "config.yaml"
     config = yaml.safe_load(config_path.read_text())
     api_key = config["tmdb"]["api_key"]
-    username = config["letterboxd"]["username"]
 
     if api_key == "your_tmdb_api_key":
         console.print("[red]Set your TMDB API key in config.yaml first.[/red]")
         sys.exit(1)
 
-    download_movielens()
+    check_movielens()
 
     tmdb_client = TMDBClient(api_key)
     ml_to_tmdb = build_tmdb_mapping(tmdb_client)
 
-    # Combine MovieLens films + user's Letterboxd films so all are embedded
-    lb_tmdb_ids = fetch_letterboxd_tmdb_ids(tmdb_client, username)
-    tmdb_ids = list(set(ml_to_tmdb.values()) | set(lb_tmdb_ids))
-    console.print(f"Total films to embed: {len(tmdb_ids):,} (MovieLens + Letterboxd)")
+    # Base metadata from movies.csv — instant, no API calls
+    base_metadata = load_movielens_base_metadata(ml_to_tmdb)
 
-    metadata = fetch_tmdb_metadata(tmdb_client, tmdb_ids)
+    # User-applied semantic tags from tags.csv
+    ml_tags = load_movielens_tags(ml_to_tmdb)
+
+    # Add Letterboxd films (may not be in MovieLens)
+    lb_tmdb_ids = fetch_letterboxd_tmdb_ids(tmdb_client, config)
+    all_tmdb_ids = list(set(base_metadata.keys()) | set(lb_tmdb_ids))
+    console.print(f"Total films to embed: {len(all_tmdb_ids):,}")
+
+    # Enrich with TMDB (plot, director, cast, keywords); fall back to base where TMDB fails
+    metadata = fetch_tmdb_metadata(tmdb_client, all_tmdb_ids, base_metadata)
+
+    # Merge user tags into keywords for richer embeddings
+    _merge_tags(metadata, ml_tags)
 
     embedder = EmbeddingModel()
     film_index = FilmIndex()

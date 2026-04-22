@@ -42,7 +42,6 @@ class CollaborativeModel:
         self.median_confidence = float(np.median(confidence)) or 1.0
         confidence /= self.median_confidence
 
-        # Use to_numpy() for guaranteed ndarray (avoids ExtensionArray ambiguity)
         rows: np.ndarray = ratings_df["userId"].map(user_to_idx).to_numpy(dtype=np.int32)
         cols: np.ndarray = ratings_df["movieId"].astype(str).map(self.movie_to_idx).to_numpy(dtype=np.int32)
         data: np.ndarray = (ratings_df["rating"].to_numpy(dtype=np.float32) - np.float32(self.global_mean)) * confidence.astype(np.float32)
@@ -85,7 +84,7 @@ class CollaborativeModel:
         return MODEL_PATH.exists()
 
     def fold_in_user(self, user_ratings: dict[int, float]) -> np.ndarray:
-        """Project a new user into the SVD latent space via least-squares fold-in.
+        """Project a new user into the SVD latent space via confidence-weighted fold-in.
 
         user_ratings: {movielens_movie_id (int): rating}
         Returns a k-dimensional user vector.
@@ -108,8 +107,6 @@ class CollaborativeModel:
         r = np.array(r_vec, dtype=np.float64)  # (n,)
 
         # Solve confidence-weighted least squares: (V^T W^2 V + λI) u = V^T W^2 r
-        # where W is diagonal with entries = confidence weight per film.
-        # Equivalent to scaling each row of V and r by its confidence weight.
         VtV = V.T @ V + np.eye(k) * 0.1
         u = np.linalg.solve(VtV, V.T @ r)
         return u.astype(np.float32)

@@ -33,9 +33,8 @@ class FilmSearcher:
                 score_cutoff=80,
                 limit=4,
             )
-            tmdb_ids = [hit[2] for hit in fuzzy_hits]
             matches = []
-            for tmdb_id in tmdb_ids:
+            for _, _, tmdb_id in fuzzy_hits:
                 meta = self.client.get_metadata(tmdb_id)
                 if meta:
                     matches.append(FilmMatch(
@@ -56,6 +55,6 @@ class FilmSearcher:
                 tmdb_id=r["id"],
                 title=r.get("title", ""),
                 year=year,
-                director="",  # not available in search results
+                director="",
             ))
         return matches
