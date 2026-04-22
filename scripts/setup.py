@@ -8,6 +8,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pandas as pd
@@ -47,12 +48,12 @@ def build_tmdb_mapping(tmdb_client: TMDBClient) -> dict[int, int]:
         return {int(k): v for k, v in json.loads(mapping_path.read_text()).items()}
 
     links = pd.read_csv(MOVIELENS_DIR / "links.csv")
-    mapping = {}
-    for _, row in track(links.iterrows(), description="Building ML→TMDB mapping", total=len(links)):
-        ml_id = int(row["movieId"])
-        tmdb_id = row.get("tmdbId")
-        if pd.notna(tmdb_id) and int(tmdb_id) != 0:
-            mapping[ml_id] = int(tmdb_id)
+    valid = links.dropna(subset=["tmdbId"])
+    valid = valid[valid["tmdbId"] != 0]
+    mapping: dict[int, int] = dict(zip(
+        valid["movieId"].astype(int).tolist(),
+        valid["tmdbId"].astype(int).tolist(),
+    ))
 
     INDEX_DIR.mkdir(parents=True, exist_ok=True)
     mapping_path.write_text(json.dumps(mapping))
@@ -68,13 +69,13 @@ def load_movielens_base_metadata(ml_to_tmdb: dict[int, int]) -> dict[int, FilmMe
     """
     movies = pd.read_csv(MOVIELENS_DIR / "movies.csv")
     base: dict[int, FilmMetadata] = {}
-    for _, row in track(movies.iterrows(), description="Loading movies.csv", total=len(movies)):
-        ml_id = int(row["movieId"])
+    for row in track(movies.itertuples(index=False), description="Loading movies.csv", total=len(movies)):
+        ml_id = int(row.movieId)
         tmdb_id = ml_to_tmdb.get(ml_id)
         if tmdb_id is None:
             continue
-        title, year = _parse_ml_title(str(row["title"]))
-        genres_raw = str(row["genres"])
+        title, year = _parse_ml_title(str(row.title))
+        genres_raw = str(row.genres)
         genres = [] if genres_raw == "(no genres listed)" else genres_raw.split("|")
         base[tmdb_id] = FilmMetadata(
             tmdb_id=tmdb_id,
@@ -111,11 +112,13 @@ def load_movielens_tags(ml_to_tmdb: dict[int, int], top_n: int = 10) -> dict[int
         .sort_values(["movieId", "count"], ascending=[True, False])
     )
 
+    tag_counts["tmdbId"] = tag_counts["movieId"].map(ml_to_tmdb)
+    tag_counts = tag_counts.dropna(subset=["tmdbId"])
+    tag_counts["tmdbId"] = tag_counts["tmdbId"].astype(int)
+
     result: dict[int, list[str]] = {}
-    for ml_id, group in tag_counts.groupby("movieId"):
-        tmdb_id = ml_to_tmdb.get(int(ml_id))
-        if tmdb_id is not None:
-            result[tmdb_id] = group["tag"].head(top_n).tolist()
+    for tmdb_id, group in tag_counts.groupby("tmdbId"):
+        result[cast(int, tmdb_id)] = group["tag"].head(top_n).tolist()
 
     console.print(f"[green]Tags loaded for {len(result):,} films.[/green]")
     return result

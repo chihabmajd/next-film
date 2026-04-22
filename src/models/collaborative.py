@@ -36,10 +36,14 @@ class CollaborativeModel:
         # log(1 + count) is the standard choice — grows fast at first, flattens out.
         # Normalized by the median so a median-popularity film has confidence=1.
         count_map = ratings_df.groupby("movieId")["rating"].count()
-        self.movie_rating_counts = {str(k): int(v) for k, v in count_map.items()}
+        self.movie_rating_counts = {
+            str(k): int(v)
+            for k, v in zip(count_map.index.tolist(), count_map.tolist())
+        }
         counts_per_row = ratings_df["movieId"].astype(str).map(self.movie_rating_counts).to_numpy(dtype=np.float32)
         confidence = np.log1p(counts_per_row)
-        self.median_confidence = float(np.median(confidence)) or 1.0
+        median_val = float(np.median(confidence))
+        self.median_confidence = median_val if median_val > 0.0 else 1.0
         confidence /= self.median_confidence
 
         rows: np.ndarray = ratings_df["userId"].map(user_to_idx).to_numpy(dtype=np.int32)

@@ -65,7 +65,7 @@ class HybridRanker:
         for ml_id, cf_score in cf_scores.items():
             tmdb_id = ml_to_tmdb[ml_id]
             cf_results.append(Recommendation(tmdb_id=tmdb_id, cf_score=cf_score, similarity=sim_map[tmdb_id]))
-        cf_results.sort(key=lambda r: r.cf_score, reverse=True)  # type: ignore[arg-type]
+        cf_results.sort(key=lambda r: r.cf_score if r.cf_score is not None else -float("inf"), reverse=True)
 
         # Films not in MovieLens: sorted by FAISS similarity, appended after CF results
         cf_tmdb_ids = {r.tmdb_id for r in cf_results}
