@@ -19,6 +19,7 @@ class CollaborativeModel:
         self.movie_to_idx: dict[str, int] = {}        # raw movieId → idx
         self.global_mean: float = 0.0
         self.movie_rating_counts: dict[str, int] = {} # raw movieId → number of ratings
+        self.movie_avg_ratings: dict[str, float] = {} # raw movieId → average rating
         self.median_confidence: float = 1.0           # median log1p(count), used to normalize
 
     def train(self, ratings_df: pd.DataFrame) -> None:
@@ -39,6 +40,11 @@ class CollaborativeModel:
         self.movie_rating_counts = {
             str(k): int(v)
             for k, v in zip(count_map.index.tolist(), count_map.tolist())
+        }
+        avg_map = ratings_df.groupby("movieId")["rating"].mean()
+        self.movie_avg_ratings = {
+            str(k): float(v)
+            for k, v in zip(avg_map.index.tolist(), avg_map.tolist())
         }
         counts_per_row = ratings_df["movieId"].astype(str).map(self.movie_rating_counts).to_numpy(dtype=np.float32)
         confidence = np.log1p(counts_per_row)
@@ -71,6 +77,7 @@ class CollaborativeModel:
                 "movie_to_idx": self.movie_to_idx,
                 "global_mean": self.global_mean,
                 "movie_rating_counts": self.movie_rating_counts,
+                "movie_avg_ratings": self.movie_avg_ratings,
                 "median_confidence": self.median_confidence,
             }, f)
 
@@ -82,6 +89,7 @@ class CollaborativeModel:
         self.movie_to_idx = data["movie_to_idx"]
         self.global_mean = data["global_mean"]
         self.movie_rating_counts = data.get("movie_rating_counts", {})
+        self.movie_avg_ratings = data.get("movie_avg_ratings", {})
         self.median_confidence = data.get("median_confidence", 1.0)
 
     def is_trained(self) -> bool:

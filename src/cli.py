@@ -18,7 +18,7 @@ from src.models.embeddings import EmbeddingModel, FilmIndex
 from src.models.hybrid import HybridRanker, Recommendation
 from src.query.builder import QueryBuilder
 from src.scrapers.letterboxd import fetch_watched, load_from_export
-from src.search.film_search import FilmSearcher
+from src.search.film_search import FilmMatch, FilmSearcher
 
 console = Console()
 INDEX_DIR = Path(__file__).parent.parent / "data" / "index"
@@ -47,56 +47,73 @@ def load_models() -> tuple[EmbeddingModel, FilmIndex, CollaborativeModel, dict, 
 
 
 def prompt_reference_films(searcher: FilmSearcher) -> list[tuple[int, float]]:
-    console.print("\n[bold]Reference films[/bold] (press Enter to skip)")
-    references: list[tuple[int, float]] = []
+    console.print("\n[bold]Reference films[/bold] — press Enter when done")
+    found: list[FilmMatch] = []
 
     while True:
-        query = Prompt.ask("  Add a film (or leave blank to continue)", default="")
+        query = Prompt.ask("  Film", default="")
         if not query.strip():
             break
-
         matches = searcher.search(query.strip())
         if not matches:
-            console.print("  [yellow]No results found. Try a different spelling.[/yellow]")
+            console.print("  [yellow]No results. Try a different spelling.[/yellow]")
             continue
-
         if len(matches) == 1:
             film = matches[0]
-            console.print(f"  Found: [cyan]{film.title} ({film.year})[/cyan]")
         else:
-            console.print("  Multiple matches:")
             for i, m in enumerate(matches, 1):
                 console.print(f"    [bold]{i}.[/bold] {m.title} ({m.year})")
             choice = Prompt.ask("  Pick one", choices=[str(i) for i in range(1, len(matches) + 1)])
             film = matches[int(choice) - 1]
+        console.print(f"  → [cyan]{film.title} ({film.year})[/cyan]")
+        found.append(film)
 
-        weight = FloatPrompt.ask(f"  Weight for [cyan]{film.title}[/cyan]", default=1.0)
-        references.append((film.tmdb_id, weight))
+    if not found:
+        return []
+    if len(found) == 1:
+        return [(found[0].tmdb_id, 1.0)]
 
-    return references
+    console.print(f"\n  {len(found)} films added. Set relative weights (Enter = 1.0):")
+    return [
+        (film.tmdb_id, FloatPrompt.ask(f"    {film.title} ({film.year})", default=1.0))
+        for film in found
+    ]
 
 
 def display_results(
     recommendations: list[Recommendation],
     metadata: dict[int, FilmMetadata],
-) -> list[Recommendation]:
+    global_mean: float,
+    avg_ratings: dict[int, float],
+    explanations: dict[int, str] | None = None,
+) -> None:
     table = Table(title="Recommendations", show_lines=True)
     table.add_column("#", style="bold", width=3)
     table.add_column("Title", style="cyan")
     table.add_column("Year", width=6)
     table.add_column("Genres")
-    table.add_column("Score", justify="right")
+    table.add_column("Predicted", justify="right", width=10)
+    table.add_column("Avg rating", justify="right", width=10)
+    if explanations:
+        table.add_column("Why", max_width=60)
 
     for i, rec in enumerate(recommendations, 1):
         meta = metadata.get(rec.tmdb_id)
         title = meta.title if meta else f"TMDB:{rec.tmdb_id}"
         year = str(meta.year) if meta else "—"
         genres = ", ".join(meta.genres[:3]) if meta else "—"
-        score = f"{rec.cf_score:.3f}" if rec.cf_score is not None else f"{rec.similarity:.3f}"
-        table.add_row(str(i), title, year, genres, score)
+        predicted = (
+            f"{min(5.0, max(0.5, rec.cf_score + global_mean)):.1f}/5"
+            if rec.cf_score is not None else "—"
+        )
+        avg = avg_ratings.get(rec.tmdb_id)
+        avg_col = f"{avg:.1f}/5" if avg is not None else "—"
+        row = [str(i), title, year, genres, predicted, avg_col]
+        if explanations:
+            row.append(explanations.get(rec.tmdb_id, ""))
+        table.add_row(*row)
 
     console.print(table)
-    return recommendations
 
 
 def main() -> None:
@@ -110,6 +127,13 @@ def main() -> None:
     tmdb_client = TMDBClient(config["tmdb"]["api_key"])
     searcher = FilmSearcher(tmdb_client, local_titles)
     query_builder = QueryBuilder(embedder, film_index)
+
+    llm_config = config.get("llm", {})
+    use_llm = (
+        llm_config.get("enabled")
+        and llm_config.get("provider") == "ollama"
+        and Confirm.ask("\nGenerate LLM explanations for recommendations?", default=False)
+    )
 
     defaults = config.get("defaults", {})
     top_n = defaults.get("top_n", 10)
@@ -213,26 +237,36 @@ def main() -> None:
 
     # Fetch metadata for display
     meta_map = tmdb_client.get_metadata_batch([r.tmdb_id for r in recommendations])
-    display_results(recommendations, meta_map)
 
-    # Optional LLM explanations
-    llm_config = config.get("llm", {})
-    if llm_config.get("enabled") and llm_config.get("provider") == "ollama":
+    # Build avg ratings lookup (tmdb_id → avg MovieLens rating)
+    avg_ratings: dict[int, float] = {}
+    for rec in recommendations:
+        ml_id = tmdb_to_ml.get(rec.tmdb_id)
+        if ml_id is not None:
+            avg = cf_model.movie_avg_ratings.get(str(ml_id))
+            if avg is not None:
+                avg_ratings[rec.tmdb_id] = avg
+
+    # Generate LLM explanations before rendering the table
+    explanations: dict[int, str] | None = None
+    if use_llm:
         explainer = LLMExplainer(model=llm_config.get("model", "llama3"))
-        ref_titles = []
-        for tmdb_id, _ in references:
-            meta = tmdb_client.get_metadata(tmdb_id)
+        ref_titles = [
+            m.title
+            for tmdb_id, _ in references
+            for m in [tmdb_client.get_metadata(tmdb_id)]
+            if m is not None
+        ]
+        console.print("Generating explanations...")
+        explanations = {}
+        for rec in recommendations:
+            meta = meta_map.get(rec.tmdb_id)
             if meta:
-                ref_titles.append(meta.title)
+                explanation = explainer.explain(meta, ref_titles, mood_text)
+                if explanation:
+                    explanations[rec.tmdb_id] = explanation
 
-        if Confirm.ask("\nGenerate explanations via Ollama?"):
-            for i, rec in enumerate(recommendations, 1):
-                meta = meta_map.get(rec.tmdb_id)
-                if meta:
-                    explanation = explainer.explain(meta, ref_titles, mood_text)
-                    if explanation:
-                        console.print(f"\n[bold]{i}. {meta.title}[/bold]")
-                        console.print(f"   {explanation}")
+    display_results(recommendations, meta_map, cf_model.global_mean, avg_ratings, explanations)
 
 
 def film_index_exists() -> bool:
