@@ -73,11 +73,17 @@ def prompt_reference_films(searcher: FilmSearcher) -> list[tuple[int, float]]:
     if len(found) == 1:
         return [(found[0].tmdb_id, 1.0)]
 
-    console.print(f"\n  {len(found)} films added. Set relative weights (Enter = 1.0):")
-    return [
-        (film.tmdb_id, FloatPrompt.ask(f"    {film.title} ({film.year})", default=1.0))
-        for film in found
-    ]
+    console.print(f"\n  {len(found)} films added. Set relative weights (Enter = 1.0 for all).")
+    console.print("  [dim]Weights are relative — 2.0 means twice the influence of 1.0. Must be positive.[/dim]")
+    references = []
+    for film in found:
+        while True:
+            weight = FloatPrompt.ask(f"    {film.title} ({film.year})", default=1.0)
+            if weight > 0:
+                break
+            console.print("    [yellow]Weight must be positive.[/yellow]")
+        references.append((film.tmdb_id, weight))
+    return references
 
 
 def display_results(
