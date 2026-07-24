@@ -5,11 +5,26 @@ tmdb:
   api_key: your_tmdb_api_key  # free at https://www.themoviedb.org/settings/api
 
 defaults:
-  beta: 0.5    # intent vs taste balance (0=pure taste, 1=pure intent)
-  gamma: 0.6   # within intent: reference films vs mood text (0=pure mood, 1=pure refs)
-  top_n: 10    # number of results to display
+  beta: 0.5              # intent vs taste balance (0=pure taste, 1=pure intent)
+  gamma: 0.6            # within intent: reference films vs mood text (0=pure mood, 1=pure refs)
+  top_n: 10             # number of results to display
+  n_taste_profiles: 6   # cluster your likes into up to N taste facets for retrieval
+  diversity: 0.3        # MMR re-rank strength (0=off, ~0.5=aggressively varied)
+  candidate_pool: 1000  # films retrieved by content before ranking
+  cf_retrieval: 0       # collaborative retrieval channel; 0=off (no top-K gain at ~120 ratings)
+  weights:              # final blend: content relevance + CF nudge − popularity penalty
+    content: 1.0
+    cf: 0.6
+    popularity: 0.15    # raise to push harder toward non-obvious films
 
-llm:
-  enabled: false
-  provider: ollama
-  model: llama3
+content:
+  # Embedding model for the film content vectors. Changing this requires rebuilding the
+  # index (python scripts/reembed.py). The index records which model it was built with.
+  model: sentence-transformers/all-mpnet-base-v2
+
+explanations:
+  # How the "Why" column is written. "auto" uses a local Ollama LLM when a server is
+  # reachable on :11434, otherwise the built-in data-driven explainer (always works, no deps).
+  # Force with "heuristic" or "ollama".
+  provider: auto
+  model:              # optional Ollama model name; blank = first installed model
