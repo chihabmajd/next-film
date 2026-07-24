@@ -52,8 +52,9 @@ def banner() -> None:
     )
 
 
-def load_models() -> tuple[EmbeddingModel, FilmIndex, CollaborativeModel, dict, dict[int, str]]:
-    embedder = EmbeddingModel(index_model_name())  # must match the model the index was built with
+def load_models() -> tuple[FilmIndex, CollaborativeModel, dict, dict[int, str]]:
+    # The embedding model is loaded lazily (only when a mood is entered) — taste and reference
+    # vectors come straight from the index, so most runs never need the 400 MB encoder.
     film_index = FilmIndex()
     film_index.load()
     cf_model = CollaborativeModel()
@@ -64,7 +65,7 @@ def load_models() -> tuple[EmbeddingModel, FilmIndex, CollaborativeModel, dict, 
         {int(k): v for k, v in json.loads(titles_path.read_text()).items()}
         if titles_path.exists() else {}
     )
-    return embedder, film_index, cf_model, tmdb_to_ml, local_titles
+    return film_index, cf_model, tmdb_to_ml, local_titles
 
 
 def resolve_watched(
@@ -210,10 +211,10 @@ def main() -> None:
         sys.exit(1)
 
     with console.status("[cyan]loading models…", spinner="dots"):
-        embedder, film_index, cf_model, tmdb_to_ml, local_titles = load_models()
+        film_index, cf_model, tmdb_to_ml, local_titles = load_models()
     tmdb_client = TMDBClient(config["tmdb"]["api_key"])
     searcher = FilmSearcher(tmdb_client, local_titles)
-    query_builder = QueryBuilder(embedder, film_index)
+    query_builder = QueryBuilder(embedder=None, film_index=film_index)  # encoder loaded lazily
 
     defaults = config.get("defaults", {})
     top_n = defaults.get("top_n", 10)
@@ -286,6 +287,11 @@ def main() -> None:
     ]
     _print_query_summary(len(rated_films), ref_titles, mood_text, beta, has_intent, taste_vector)
 
+    # Encoding a free-text mood is the only thing that needs the embedding model — load it now.
+    if mood_text:
+        with console.status("[cyan]loading text encoder…", spinner="dots"):
+            query_builder.embedder = EmbeddingModel(index_model_name())
+
     query_vector = query_builder.build_query_vector(
         taste_vector=taste_vector, reference_films=references,
         mood_text=mood_text, beta=beta, gamma=gamma,
@@ -310,23 +316,27 @@ def main() -> None:
         return
 
     meta_map = tmdb_client.get_metadata_batch([r.tmdb_id for r in recommendations])
-    avg_ratings = {
-        rec.tmdb_id: cf_model.movie_avg_ratings[str(tmdb_to_ml[rec.tmdb_id])]
-        for rec in recommendations
-        if rec.tmdb_id in tmdb_to_ml and str(tmdb_to_ml[rec.tmdb_id]) in cf_model.movie_avg_ratings
-    }
+    avg_ratings = {}
+    for rec in recommendations:
+        ml_id = tmdb_to_ml.get(rec.tmdb_id)
+        avg = cf_model.movie_avg_ratings.get(str(ml_id)) if ml_id is not None else None
+        if avg is not None:
+            avg_ratings[rec.tmdb_id] = avg
 
     # ---- explanations (grounded in your highly-rated films) ------------------------------
     liked = {}
     for tmdb_id, rating in rated_films.items():
-        if rating >= 4.0:
-            vec = film_index.get_vector(tmdb_id)
-            m = tmdb_client.get_metadata(tmdb_id) if vec is not None else None
-            if m is not None and vec is not None:
-                liked[tmdb_id] = (m, rating, vec)
+        if rating < 4.0:
+            continue
+        vec = film_index.get_vector(tmdb_id)
+        if vec is None:
+            continue
+        meta = tmdb_client.get_metadata(tmdb_id)
+        if meta is not None:
+            liked[tmdb_id] = (meta, rating, vec)
 
     explainer = Explainer(provider=exp_provider, model=exp_model, liked=liked)
-    if explainer.active == "ollama-unavailable":
+    if explainer.requested_but_unavailable:
         console.print("[yellow]Ollama requested but no server on :11434 — using built-in explanations "
                       "(run `ollama serve` & `ollama pull llama3.2` to enable the neural writer).[/yellow]")
     backend_note = f"Ollama · {explainer.model}" if explainer.active == "ollama" else "built-in"

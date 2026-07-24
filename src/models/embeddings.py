@@ -99,6 +99,9 @@ class FilmIndex:
     def is_built(self) -> bool:
         return (INDEX_DIR / "films.faiss").exists()
 
+    def has(self, tmdb_id: int) -> bool:
+        return tmdb_id in self._pos_map
+
     def get_vector(self, tmdb_id: int) -> np.ndarray | None:
         assert self.index is not None, "Index not loaded"
         pos = self._pos_map.get(tmdb_id)
@@ -107,3 +110,43 @@ class FilmIndex:
         vec = np.empty(self.index.d, dtype=np.float32)  # type: ignore[attr-defined]
         self.index.reconstruct(pos, vec)                 # type: ignore[call-arg]
         return vec
+
+    def get_vectors(self, tmdb_ids: list[int]) -> tuple[np.ndarray, list[int]]:
+        """Reconstruct many vectors at once into a single (N, d) matrix.
+
+        Returns (matrix, kept_ids) where kept_ids drops any id not in the index, in order.
+        Callers can then score with one matmul instead of a Python loop of dot products.
+        """
+        assert self.index is not None, "Index not loaded"
+        positions, kept = [], []
+        for tid in tmdb_ids:
+            pos = self._pos_map.get(tid)
+            if pos is not None:
+                positions.append(pos)
+                kept.append(tid)
+        out = np.empty((len(positions), self.index.d), dtype=np.float32)  # type: ignore[attr-defined]
+        for row, pos in enumerate(positions):
+            self.index.reconstruct(pos, out[row])  # type: ignore[call-arg]
+        return out, kept
+
+
+def embed_and_index(
+    embedder: "EmbeddingModel",
+    film_index: FilmIndex,
+    ids: list[int],
+    texts: list[str],
+    batch_size: int = 256,
+) -> None:
+    """Encode `texts` in batches, build the FAISS index over `ids`, and save it.
+
+    Shared by scripts/setup.py and scripts/reembed.py so the batch size and the
+    encode → vstack → build → save contract live in exactly one place.
+    """
+    from rich.progress import track
+
+    vecs = [
+        embedder.encode(texts[i: i + batch_size])
+        for i in track(range(0, len(texts), batch_size), description="Embedding")
+    ]
+    film_index.build(np.vstack(vecs), ids)
+    film_index.save(model_name=embedder.model_name)

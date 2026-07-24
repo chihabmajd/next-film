@@ -17,7 +17,7 @@ class Recommendation:
 
 # Default blend. Content relevance leads; CF is a supporting "people like you" nudge;
 # popularity is subtracted so obvious blockbusters don't dominate a cinephile's list.
-DEFAULT_WEIGHTS = {"content": 1.0, "cf": 0.6, "popularity": 0.3}
+DEFAULT_WEIGHTS = {"content": 1.0, "cf": 0.6, "popularity": 0.15}
 
 # Standardized signals are clipped to ±this many standard deviations before blending. CF
 # scores are heavy-tailed — without clipping, one outlier film gets a z-score of ~20 and
@@ -61,18 +61,17 @@ class HybridRanker:
         #   (c) collaborative — films people with your rating pattern love, which content
         #       retrieval structurally misses (they can sit far away in embedding space).
         # Content still governs relevance at scoring time, so off-taste CF candidates score low.
-        watched = watched_tmdb_ids
         candidates: list[int] = []
         seen: set[int] = set()
 
         def add_ids(ids) -> None:
             for tmdb_id in ids:
-                if tmdb_id in watched or tmdb_id in seen:
+                if tmdb_id in watched_tmdb_ids or tmdb_id in seen:
                     continue
                 seen.add(tmdb_id)
                 candidates.append(tmdb_id)
 
-        add_ids(t for t, _ in self.film_index.search(query_vector, k=candidate_pool + len(watched)))
+        add_ids(t for t, _ in self.film_index.search(query_vector, k=candidate_pool + len(watched_tmdb_ids)))
         for profile in taste_profiles or []:
             add_ids(t for t, _ in self.film_index.search(profile, k=candidate_pool // 3))
         if cf_retrieval > 0 and np.any(user_vector):
@@ -84,16 +83,14 @@ class HybridRanker:
         if not candidates:
             return []
 
-        # Content similarity of every candidate against the query vector (uniform scale).
-        vecs: dict[int, np.ndarray] = {}
-        content: dict[int, float] = {}
-        for tmdb_id in candidates:
-            vec = self.film_index.get_vector(tmdb_id)
-            if vec is None:
-                continue
-            vecs[tmdb_id] = vec
-            content[tmdb_id] = float(np.dot(query_vector, vec))
-        candidates = [c for c in candidates if c in vecs]
+        # Content similarity of every candidate against the query vector: one batched
+        # reconstruct + a single matmul, rather than a reconstruct/dot per candidate.
+        # get_vectors also drops any id not in the index (CF retrieval can surface some).
+        V, candidates = self.film_index.get_vectors(candidates)
+        if not candidates:
+            return []
+        content_arr = V @ query_vector  # (N,) cosine — both sides are unit-normalized
+        vecs = {tid: V[i] for i, tid in enumerate(candidates)}
 
         # ---- Stage 2: debiased collaborative-filtering signal ---------------------------
         # Raw CF scores carry a popularity offset (well-loved films score high for everyone).
@@ -113,12 +110,13 @@ class HybridRanker:
 
         # ---- Stage 3: blend -------------------------------------------------------------
         # Put content on the same scale as cf_z by z-scoring it across the candidate pool.
-        c_vals = np.array([content[c] for c in candidates], dtype=np.float64)
-        c_mean, c_std = float(c_vals.mean()), float(c_vals.std() or 1.0)
+        c_mean = float(content_arr.mean())
+        c_std = float(content_arr.std()) or 1.0
 
         scored: list[Recommendation] = []
-        for c in candidates:
-            content_z = _clip((content[c] - c_mean) / c_std)
+        for i, c in enumerate(candidates):
+            content_sim = float(content_arr[i])
+            content_z = _clip((content_sim - c_mean) / c_std)
             raw_cf = cf_z.get(c)
             czi = _clip(raw_cf) if raw_cf is not None else None
             ml_id = self.tmdb_to_ml.get(c)
@@ -132,7 +130,7 @@ class HybridRanker:
                 Recommendation(
                     tmdb_id=c,
                     score=score,
-                    content_sim=content[c],
+                    content_sim=content_sim,
                     cf_z=czi,
                     popularity=popularity,
                 )
@@ -172,19 +170,16 @@ class HybridRanker:
 
         pool = list(recs)
         selected: list[Recommendation] = []
+        # Running max cosine similarity of each pool item to the already-selected set,
+        # updated against only the newest pick each round (not recomputed from scratch).
+        max_sim = {r.tmdb_id: 0.0 for r in recs}
         while pool and len(selected) < top_n:
-            best, best_val = None, -float("inf")
+            pick = max(pool, key=lambda r: norm[r.tmdb_id] - diversity * max_sim[r.tmdb_id])
+            selected.append(pick)
+            pool.remove(pick)
+            picked_vec = vecs[pick.tmdb_id]
             for r in pool:
-                if not selected:
-                    val = norm[r.tmdb_id]
-                else:
-                    max_sim = max(
-                        float(np.dot(vecs[r.tmdb_id], vecs[s.tmdb_id])) for s in selected
-                    )
-                    val = norm[r.tmdb_id] - diversity * max_sim
-                if val > best_val:
-                    best, best_val = r, val
-            assert best is not None
-            selected.append(best)
-            pool.remove(best)
+                sim = float(np.dot(vecs[r.tmdb_id], picked_vec))
+                if sim > max_sim[r.tmdb_id]:
+                    max_sim[r.tmdb_id] = sim
         return selected

@@ -10,7 +10,6 @@ import sys
 from pathlib import Path
 from typing import Any, cast
 
-import numpy as np
 import pandas as pd
 from rich.console import Console
 from rich.progress import track
@@ -19,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.enrichment.tmdb import FilmMetadata, TMDBClient
 from src.models.collaborative import CollaborativeModel
-from src.models.embeddings import EmbeddingModel, FilmIndex
+from src.models.embeddings import EmbeddingModel, FilmIndex, embed_and_index
 
 console = Console()
 
@@ -165,15 +164,7 @@ def build_embeddings(metadata: dict[int, FilmMetadata], embedder: EmbeddingModel
     texts = [metadata[tid].to_text_blob() for tid in tmdb_ids]
 
     console.print(f"Embedding {len(texts):,} films with {embedder.model_name}...")
-    batch_size = 256
-    all_vecs = []
-    for i in track(range(0, len(texts), batch_size), description="Embedding"):
-        batch = texts[i: i + batch_size]
-        all_vecs.append(embedder.encode(batch))
-
-    vectors = np.vstack(all_vecs)
-    film_index.build(vectors, tmdb_ids)
-    film_index.save(model_name=embedder.model_name)
+    embed_and_index(embedder, film_index, tmdb_ids, texts)
     console.print("[green]FAISS index saved.[/green]")
 
 

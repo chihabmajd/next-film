@@ -48,11 +48,17 @@ class Explainer:
         liked: {tmdb_id: (metadata, your_rating, embedding_vector)} for films you rated highly —
                the material the heuristic explainer grounds its reasons in.
         """
-        self.liked = liked or {}
         self.provider = provider
         self.model = model
         self._ollama = None
-        self.active = "heuristic"
+        self.active = "heuristic"          # the backend actually in use: "heuristic" or "ollama"
+        self.requested_but_unavailable = False  # True iff provider=ollama but no server answered
+
+        # Stack the liked films' vectors once so _closest_liked is a single matmul, not a loop.
+        self._liked = list((liked or {}).values())  # [(FilmMetadata, rating, vector)]
+        self._liked_matrix = (
+            np.stack([vec for _, _, vec in self._liked]) if self._liked else None
+        )
 
         if provider in ("auto", "ollama"):
             reachable, models = ollama_available()
@@ -60,8 +66,7 @@ class Explainer:
                 self.model = model if (model and model in models) else models[0]
                 self.active = "ollama"
             elif provider == "ollama":
-                # explicitly requested but not reachable — caller reports this
-                self.active = "ollama-unavailable"
+                self.requested_but_unavailable = True
 
     # ---- public -------------------------------------------------------------------------
     def explain(self, film: FilmMetadata, vec: np.ndarray | None, mood_text: str | None) -> str:
@@ -103,14 +108,11 @@ class Explainer:
         return " ".join(bits) if bits else "Strong match for your query."
 
     def _closest_liked(self, vec: np.ndarray | None) -> tuple[FilmMetadata, float] | None:
-        if vec is None or not self.liked:
+        if vec is None or self._liked_matrix is None:
             return None
-        best, best_sim = None, -2.0
-        for meta, rating, lvec in self.liked.values():
-            sim = float(np.dot(vec, lvec))
-            if sim > best_sim:
-                best, best_sim = (meta, rating), sim
-        return best
+        i = int(np.argmax(self._liked_matrix @ vec))
+        meta, rating, _ = self._liked[i]
+        return meta, rating
 
     @staticmethod
     def _overlap(a: list[str], b: list[str]) -> list[str]:
@@ -138,7 +140,7 @@ class Explainer:
             if self._ollama is None:
                 import ollama
                 self._ollama = ollama
-            liked_titles = ", ".join(m.title for m, _, _ in list(self.liked.values())[:6])
+            liked_titles = ", ".join(m.title for m, _, _ in self._liked[:6])
             prompt = (
                 "In one vivid sentence, tell the user why they'll like this film. "
                 f"Films they love: {liked_titles}. "

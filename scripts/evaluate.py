@@ -69,39 +69,53 @@ def preset_configs() -> dict[str, dict]:
     }
 
 
-def evaluate_config(
+def build_folds(
     fi: FilmIndex,
     cf: CollaborativeModel,
     tmdb_to_ml: dict[int, int],
     rated: dict[int, float],
     likeable: list[int],
-    cfg: dict,
     reps: int,
     holdout: int,
-    pool: int,
     n_profiles: int,
     seed: int,
-) -> dict[str, float]:
+) -> list[tuple[list[int], "np.ndarray", list, "np.ndarray"]]:
+    """Precompute the hold-out folds ONCE. taste/profiles/user-vector depend only on the
+    train split, not on the ranking config, so building them here avoids recomputing them
+    for every preset config (they were rebuilt 6× before)."""
     qb = QueryBuilder(embedder=None, film_index=fi)  # taste needs no text encoder
-    ranker = HybridRanker(fi, cf, tmdb_to_ml)
     rng = random.Random(seed)
-    all_watched = set(rated.keys())
-
-    hits = {k: [] for k in KS}
-    rr: list[float] = []
+    folds = []
     for _ in range(reps):
         held = rng.sample(likeable, holdout)
         train = {t: r for t, r in rated.items() if t not in held}
         taste = qb.build_taste_vector(train)
         if taste is None:
             continue
-        profiles = qb.build_taste_profiles(train, n_profiles=n_profiles) if cfg["profiles"] else None
+        profiles = qb.build_taste_profiles(train, n_profiles=n_profiles)
         uv = cf.fold_in_user({tmdb_to_ml[t]: r for t, r in train.items() if t in tmdb_to_ml})
-        watched = all_watched - set(held)  # held-out films must be eligible candidates
+        folds.append((held, taste, profiles, uv))
+    return folds
+
+
+def evaluate_config(
+    fi: FilmIndex,
+    cf: CollaborativeModel,
+    tmdb_to_ml: dict[int, int],
+    all_watched: set[int],
+    folds: list,
+    cfg: dict,
+    pool: int,
+) -> dict[str, float]:
+    ranker = HybridRanker(fi, cf, tmdb_to_ml)
+    hits = {k: [] for k in KS}
+    rr: list[float] = []
+    for held, taste, profiles, uv in folds:
         recs = ranker.recommend(
-            taste, uv, watched,
-            taste_profiles=profiles, top_n=pool, weights=cfg["weights"],
-            diversity=0.0, candidate_pool=pool, cf_retrieval=cfg.get("cf_retrieval", 1000),
+            taste, uv, all_watched - set(held),  # held-out films must be eligible candidates
+            taste_profiles=profiles if cfg["profiles"] else None,
+            top_n=pool, weights=cfg["weights"],
+            diversity=0.0, candidate_pool=pool, cf_retrieval=cfg.get("cf_retrieval", 0),
         )
         rank_of = {r.tmdb_id: i for i, r in enumerate(recs)}
         for t in held:
@@ -134,7 +148,7 @@ def main() -> None:
     rated = load_rated()
     # Only hold out likes that are actually in this index — otherwise we'd be measuring
     # resolution gaps, not ranking, and it would penalize every config identically.
-    likeable = [t for t, r in rated.items() if r >= args.like_threshold and fi.get_vector(t) is not None]
+    likeable = [t for t, r in rated.items() if r >= args.like_threshold and fi.has(t)]
     console.print(
         f"Index: [cyan]{index_dir.name}[/cyan] (dim={fi.index.d}) | "
         f"rated={len(rated)} | likes≥{args.like_threshold} in index={len(likeable)} | "
@@ -144,26 +158,27 @@ def main() -> None:
         console.print("[red]Not enough in-index likes to hold out. Lower --holdout or --like-threshold.[/red]")
         sys.exit(1)
 
+    metrics = [*(f"recall@{k}" for k in KS), "MRR"]
+    folds = build_folds(fi, cf, tmdb_to_ml, rated, likeable,
+                        args.reps, args.holdout, args.n_profiles, args.seed)
+    all_watched = set(rated)
+
     table = Table(title="Leave-N-out evaluation", show_lines=False)
     table.add_column("config", style="cyan")
-    for k in KS:
-        table.add_column(f"recall@{k}", justify="right")
-    table.add_column("MRR", justify="right")
+    for m in metrics:
+        table.add_column(m, justify="right")
 
-    rows = []
-    for name, cfg in preset_configs().items():
-        m = evaluate_config(fi, cf, tmdb_to_ml, rated, likeable, cfg,
-                            args.reps, args.holdout, args.pool, args.n_profiles, args.seed)
-        rows.append((name, m))
-
-    best = {metric: max(r[1][metric] for r in rows) for metric in [*(f"recall@{k}" for k in KS), "MRR"]}
+    rows = [
+        (name, evaluate_config(fi, cf, tmdb_to_ml, all_watched, folds, cfg, args.pool))
+        for name, cfg in preset_configs().items()
+    ]
+    best = {metric: max(r[1][metric] for r in rows) for metric in metrics}
     for name, m in rows:
         cells = [name]
-        for metric in [*(f"recall@{k}" for k in KS), "MRR"]:
+        for metric in metrics:
             val = m[metric]
-            mark = "[bold green]" if abs(val - best[metric]) < 1e-9 else ""
-            end = "[/bold green]" if mark else ""
-            cells.append(f"{mark}{val:.3f}{end}")
+            hot = abs(val - best[metric]) < 1e-9
+            cells.append(f"[bold green]{val:.3f}[/bold green]" if hot else f"{val:.3f}")
         table.add_row(*cells)
     console.print(table)
 

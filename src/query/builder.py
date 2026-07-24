@@ -37,13 +37,7 @@ class QueryBuilder:
 
         if not vecs:
             return None
-        V = np.stack(vecs)
-        w = np.array(weights, dtype=np.float32)
-        denom = float(np.abs(w).sum())
-        if denom == 0.0:
-            return None
-        taste = (w[:, None] * V).sum(axis=0) / denom
-        return self._normalize(taste)
+        return self._weighted_centroid(np.stack(vecs), weights)
 
     def build_taste_profiles(
         self,
@@ -79,25 +73,20 @@ class QueryBuilder:
             single = self.build_taste_vector(rated_films)
             return [single] if single is not None else []
 
+        # len(vecs) >= min_per_profile * 2 here, so k >= 2 — no single-cluster special case.
         V = np.stack(vecs)
         w = np.array(weights, dtype=np.float64)
-        k = max(1, min(n_profiles, len(vecs) // min_per_profile))
-        if k == 1:
-            return [self._normalize((w[:, None] * V).sum(axis=0) / w.sum())]
+        k = min(n_profiles, len(vecs) // min_per_profile)
 
         from sklearn.cluster import KMeans
 
-        labels = KMeans(n_clusters=k, n_init=10, random_state=42).fit_predict(
-            V, sample_weight=w
-        )
+        labels = KMeans(n_clusters=k, n_init=10, random_state=42).fit_predict(V, sample_weight=w)
         profiles: list[np.ndarray] = []
         for c in range(k):
             mask = labels == c
-            if not mask.any():
-                continue
-            cw = w[mask]
-            centroid = (cw[:, None] * V[mask]).sum(axis=0) / cw.sum()
-            profiles.append(self._normalize(centroid.astype(np.float32)))
+            centroid = self._weighted_centroid(V[mask], w[mask]) if mask.any() else None
+            if centroid is not None:
+                profiles.append(centroid)
         return profiles
 
     def build_query_vector(
@@ -157,17 +146,26 @@ class QueryBuilder:
                 weights.append(weight)
         if not vecs:
             return None
-        V = np.stack(vecs)
-        w = np.array(weights, dtype=np.float32)
-        total = w.sum()
-        if total == 0.0:
+        return self._weighted_centroid(np.stack(vecs), weights)
+
+    @staticmethod
+    def _weighted_centroid(vectors: np.ndarray, weights) -> np.ndarray | None:
+        """Normalized weighted mean of `vectors` (rows) by `weights`.
+
+        Divides by the L1 norm of the weights, so it averages correctly whether the weights
+        are all positive (reference films, cluster members) or signed (likes minus dislikes).
+        Returns None when the weights have zero total magnitude.
+        """
+        w = np.asarray(weights, dtype=np.float64)
+        denom = float(np.abs(w).sum())
+        if denom == 0.0:
             return None
-        w /= total
-        return self._normalize((w[:, None] * V).sum(axis=0))
+        centroid = (w[:, None] * vectors).sum(axis=0) / denom
+        return QueryBuilder._normalize(centroid)
 
     @staticmethod
     def _normalize(v: np.ndarray) -> np.ndarray:
         norm = np.linalg.norm(v)
         if norm == 0:
-            return v
+            return v.astype(np.float32)
         return (v / norm).astype(np.float32)
