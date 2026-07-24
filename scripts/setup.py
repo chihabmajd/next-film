@@ -164,7 +164,7 @@ def build_embeddings(metadata: dict[int, FilmMetadata], embedder: EmbeddingModel
     tmdb_ids = list(metadata.keys())
     texts = [metadata[tid].to_text_blob() for tid in tmdb_ids]
 
-    console.print(f"Embedding {len(texts):,} films...")
+    console.print(f"Embedding {len(texts):,} films with {embedder.model_name}...")
     batch_size = 256
     all_vecs = []
     for i in track(range(0, len(texts), batch_size), description="Embedding"):
@@ -173,7 +173,7 @@ def build_embeddings(metadata: dict[int, FilmMetadata], embedder: EmbeddingModel
 
     vectors = np.vstack(all_vecs)
     film_index.build(vectors, tmdb_ids)
-    film_index.save()
+    film_index.save(model_name=embedder.model_name)
     console.print("[green]FAISS index saved.[/green]")
 
 
@@ -207,9 +207,9 @@ def fetch_letterboxd_tmdb_ids(tmdb_client: TMDBClient, config: dict) -> list[int
 
     tmdb_ids = []
     for film in track(watched, description="Resolving Letterboxd films to TMDB"):
-        results = tmdb_client.search(film.title, film.year)
-        if results:
-            tmdb_ids.append(results[0]["id"])
+        tmdb_id = tmdb_client.best_match(film.title, film.year)
+        if tmdb_id is not None:
+            tmdb_ids.append(tmdb_id)
     return tmdb_ids
 
 
@@ -245,7 +245,8 @@ def main() -> None:
     # Merge user tags into keywords for richer embeddings
     _merge_tags(metadata, ml_tags)
 
-    embedder = EmbeddingModel()
+    model_name = config.get("content", {}).get("model")
+    embedder = EmbeddingModel(model_name)
     film_index = FilmIndex()
     build_embeddings(metadata, embedder, film_index)
 

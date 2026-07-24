@@ -21,6 +21,7 @@ class CollaborativeModel:
         self.movie_rating_counts: dict[str, int] = {} # raw movieId → number of ratings
         self.movie_avg_ratings: dict[str, float] = {} # raw movieId → average rating
         self.median_confidence: float = 1.0           # median log1p(count), used to normalize
+        self._max_log_count: float | None = None      # lazily-computed max log1p(count), for popularity
 
     def train(self, ratings_df: pd.DataFrame) -> None:
         # ratings_df: columns [userId, movieId, rating]
@@ -132,3 +133,35 @@ class CollaborativeModel:
             if idx is not None:
                 scores[ml_id] = float(np.dot(user_vector, self.item_factors[idx]))
         return scores
+
+    def top_items(self, user_vector: np.ndarray, m: int) -> list[str]:
+        """The m films this user vector scores highest across the *entire* catalog.
+
+        This is a collaborative retrieval channel: it finds films that people with your rating
+        pattern love, regardless of whether they resemble your films in content-embedding space.
+        Content retrieval can only surface films near yours in style/topic; this surfaces films
+        near yours in *taste* — the cross-genre correlations embeddings can't see.
+        """
+        assert self.item_factors is not None, "Model not loaded"
+        scores = self.item_factors @ user_vector  # (n_items,)
+        if m >= len(scores):
+            idx = np.argsort(-scores)
+        else:
+            top = np.argpartition(-scores, m)[:m]
+            idx = top[np.argsort(-scores[top])]
+        return [self.movie_raw_ids[i] for i in idx]
+
+    def popularity(self, ml_id: int) -> float:
+        """How mainstream a film is, in [0, 1] — log rating count normalized by the most-rated film.
+
+        Used by the ranker to *penalize* popularity so obvious blockbusters don't dominate.
+        """
+        count = self.movie_rating_counts.get(str(ml_id), 0)
+        if count <= 0:
+            return 0.0
+        if self._max_log_count is None:
+            counts = self.movie_rating_counts.values()
+            self._max_log_count = float(np.log1p(max(counts))) if counts else 1.0
+            if self._max_log_count <= 0.0:
+                self._max_log_count = 1.0
+        return float(np.log1p(count) / self._max_log_count)

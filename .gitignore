@@ -11,3 +11,8 @@ data/cache/
 
 # keep config template but not personal secrets
 config.yaml
+
+# personal Letterboxd data — never publish
+letterboxd-export/
+likes/
+orphaned/

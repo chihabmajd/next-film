@@ -8,10 +8,17 @@ class QueryBuilder:
         self.embedder = embedder
         self.film_index = film_index
 
-    def build_taste_vector(self, rated_films: dict[int, float]) -> np.ndarray | None:
-        """Weighted average of film vectors, weighted by how much above your mean each rating is.
+    def build_taste_vector(
+        self, rated_films: dict[int, float], dislike_weight: float = 0.5
+    ) -> np.ndarray | None:
+        """Signed weighted average of film vectors, centered on your personal mean rating.
+
         rated_films: {tmdb_id: rating}
-        Films rated below your personal mean contribute zero — taste vector only reflects what you liked.
+
+        Films above your mean pull the vector toward them; films *below* your mean push it
+        away (weighted by `dislike_weight`, since a dislike is a noisier signal than a like).
+        Rating your own average exactly contributes nothing. This is a two-sided signal — the
+        previous version discarded everything you disliked, throwing away half your ratings.
         """
         if not rated_films:
             return None
@@ -19,20 +26,79 @@ class QueryBuilder:
 
         vecs, weights = [], []
         for tmdb_id, rating in rated_films.items():
-            weight = max(0.0, rating - mean_rating)
-            if weight == 0.0:
+            delta = rating - mean_rating
+            if delta == 0.0:
                 continue
             vec = self.film_index.get_vector(tmdb_id)
-            if vec is not None:
-                vecs.append(vec)
-                weights.append(weight)
+            if vec is None:
+                continue
+            vecs.append(vec)
+            weights.append(delta if delta > 0 else delta * dislike_weight)
 
         if not vecs:
             return None
         V = np.stack(vecs)
         w = np.array(weights, dtype=np.float32)
-        taste = (w[:, None] * V).sum(axis=0) / w.sum()
+        denom = float(np.abs(w).sum())
+        if denom == 0.0:
+            return None
+        taste = (w[:, None] * V).sum(axis=0) / denom
         return self._normalize(taste)
+
+    def build_taste_profiles(
+        self,
+        rated_films: dict[int, float],
+        n_profiles: int = 4,
+        min_per_profile: int = 3,
+    ) -> list[np.ndarray]:
+        """Cluster your *liked* films into a few taste centroids instead of one average.
+
+        Your taste is multi-modal — you might love both noir and screwball comedies. A single
+        averaged vector collapses those modes into a mushy centroid that retrieves generic
+        acclaimed films. Clustering the liked films (weighted by how much you liked them) keeps
+        the modes separate, so retrieval can pull candidates for *each* facet of your taste.
+
+        Returns a list of unit vectors (one per discovered profile). Falls back to a single
+        taste vector when there aren't enough liked films to cluster.
+        """
+        if not rated_films:
+            return []
+        mean_rating = sum(rated_films.values()) / len(rated_films)
+
+        vecs, weights = [], []
+        for tmdb_id, rating in rated_films.items():
+            delta = rating - mean_rating
+            if delta <= 0.0:
+                continue
+            vec = self.film_index.get_vector(tmdb_id)
+            if vec is not None:
+                vecs.append(vec)
+                weights.append(delta)
+
+        if len(vecs) < min_per_profile * 2:
+            single = self.build_taste_vector(rated_films)
+            return [single] if single is not None else []
+
+        V = np.stack(vecs)
+        w = np.array(weights, dtype=np.float64)
+        k = max(1, min(n_profiles, len(vecs) // min_per_profile))
+        if k == 1:
+            return [self._normalize((w[:, None] * V).sum(axis=0) / w.sum())]
+
+        from sklearn.cluster import KMeans
+
+        labels = KMeans(n_clusters=k, n_init=10, random_state=42).fit_predict(
+            V, sample_weight=w
+        )
+        profiles: list[np.ndarray] = []
+        for c in range(k):
+            mask = labels == c
+            if not mask.any():
+                continue
+            cw = w[mask]
+            centroid = (cw[:, None] * V[mask]).sum(axis=0) / cw.sum()
+            profiles.append(self._normalize(centroid.astype(np.float32)))
+        return profiles
 
     def build_query_vector(
         self,

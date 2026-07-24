@@ -22,18 +22,50 @@ class FilmMetadata:
     keywords: list[str] = field(default_factory=list)
 
     def to_text_blob(self) -> str:
-        parts = [f"{self.title} ({self.year})."]
+        """Text that gets embedded — deliberately front-loaded with taste-bearing fields.
+
+        A viewer's taste tracks *director, genre and theme* far more than plot. The previous
+        blob led with a paragraph of plot, so the embedding mostly encoded what a film was
+        *about* rather than its sensibility. Here director/genre/keywords come first, the plot
+        is trimmed so it no longer dominates, and the director is mentioned twice — in a
+        mean-pooled sentence embedding, repeating a token up-weights it.
+
+        The film's own title is deliberately NOT embedded: a title is an *identifier*, not a
+        *descriptor*, so it carries no taste signal but causes lexical collisions (embedding
+        "Parasite" pulled in every unrelated film with "Parasite" in its name). Identity is
+        recovered from the tmdb_id → title map at display time, not from this text. Only a
+        coarse decade is kept, as a mild era signal.
+        """
+        parts: list[str] = []
+        if self.director:
+            parts.append(f"A film directed by {self.director}.")
+        if self.genres:
+            parts.append(f"Genre: {', '.join(self.genres)}.")
+        if self.keywords:
+            parts.append(f"Themes and style: {', '.join(self.keywords[:12])}.")
+        short = self._short_plot()
+        if short:
+            parts.append(short)
         if self.director:
             parts.append(f"Directed by {self.director}.")
-        if self.plot:
-            parts.append(self.plot)
-        if self.genres:
-            parts.append(f"Genres: {', '.join(self.genres)}.")
-        if self.keywords:
-            parts.append(f"Keywords: {', '.join(self.keywords[:15])}.")
         if self.cast:
-            parts.append(f"Cast: {', '.join(self.cast[:5])}.")
+            parts.append(f"Starring {', '.join(self.cast[:4])}.")
+        if self.year:
+            parts.append(f"Released in the {self.year // 10 * 10}s.")
         return " ".join(parts)
+
+    def _short_plot(self, max_chars: int = 240) -> str:
+        """Trim the plot to ~2 sentences so it informs but doesn't dominate the vector."""
+        if not self.plot:
+            return ""
+        text = self.plot.strip()
+        if len(text) <= max_chars:
+            return text
+        cut = text[:max_chars]
+        boundary = cut.rfind(". ")
+        if boundary >= 80:
+            return cut[: boundary + 1]
+        return cut.rstrip() + "…"
 
 
 class TMDBClient:
@@ -47,6 +79,41 @@ class TMDBClient:
             params["year"] = year
         data = self._get("/search/movie", params)
         return data.get("results", [])
+
+    def best_match(self, title: str, year: int | None = None) -> int | None:
+        """Resolve a (title, year) to a single TMDB id, robustly.
+
+        The old code took `search(...)[0]` blindly, which silently picked remakes, shorts,
+        same-name documentaries, or the wrong-year edition — corrupting both the taste vector
+        and the "already watched" filter. This scores candidates on exact-title match, year
+        proximity (Letterboxd's year can be off by one vs TMDB's release date), and popularity
+        as a tiebreak, and retries without the year filter when a year-constrained search is empty.
+        """
+        results = self.search(title, year)
+        if not results and year:
+            results = self.search(title)
+        if not results:
+            return None
+
+        target = title.strip().lower()
+
+        def score(r: dict) -> float:
+            s = 0.0
+            cand = (r.get("title") or "").strip().lower()
+            orig = (r.get("original_title") or "").strip().lower()
+            if target in (cand, orig):
+                s += 3.0
+            elif target in cand or cand in target:
+                s += 1.0
+            release = r.get("release_date") or ""
+            cand_year = int(release[:4]) if release[:4].isdigit() else 0
+            if year and cand_year:
+                d = abs(cand_year - year)
+                s += 2.0 if d == 0 else 1.0 if d == 1 else -0.5 * min(d, 4)
+            s += min(float(r.get("popularity", 0.0)) / 50.0, 1.0)  # gentle tiebreak
+            return s
+
+        return int(max(results, key=score)["id"])
 
     def get_metadata(self, tmdb_id: int) -> FilmMetadata | None:
         cache_path = CACHE_DIR / f"{tmdb_id}.json"
