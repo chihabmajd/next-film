@@ -1,10 +1,9 @@
-"""next-film CLI — personal cinema recommender."""
+"""next-film CLI: personal cinema recommender."""
 
 import os
 
-# The CLI only ever loads an already-cached embedding model, so run the Hugging Face stack
-# offline: no hub round-trip (faster start) and no "unauthenticated requests" notice. Setup
-# and reembed do NOT set this — they need to download models.
+# Runs the Hugging Face stack offline; the CLI only loads an already-cached embedding model.
+# Setup and reembed don't set this, since they need to download models.
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
@@ -53,8 +52,8 @@ def banner() -> None:
 
 
 def load_models() -> tuple[FilmIndex, CollaborativeModel, dict, dict[int, str]]:
-    # The embedding model is loaded lazily (only when a mood is entered) — taste and reference
-    # vectors come straight from the index, so most runs never need the 400 MB encoder.
+    # Embedding model is loaded lazily, only when a mood is entered: taste and reference
+    # vectors come straight from the index.
     film_index = FilmIndex()
     film_index.load()
     cf_model = CollaborativeModel()
@@ -71,11 +70,10 @@ def load_models() -> tuple[FilmIndex, CollaborativeModel, dict, dict[int, str]]:
 def resolve_watched(
     watched: list, tmdb_client: TMDBClient
 ) -> tuple[set[int], dict[int, float]]:
-    """Resolve Letterboxd films to TMDB ids via robust best-match, cached to disk.
+    """Resolves Letterboxd films to TMDB ids via best-match, cached to disk.
 
-    Resolution is deterministic and slow (one TMDB search per unseen film), so results are
-    persisted to data/index/lb_resolved.json keyed by "title|year". Films that can't be
-    resolved are cached as -1 so they aren't re-searched every run.
+    Persisted to data/index/lb_resolved.json keyed by "title|year"; unresolved films are
+    cached as -1 so they aren't re-searched.
     """
     cache_path = INDEX_DIR / "lb_resolved.json"
     cache: dict[str, int] = json.loads(cache_path.read_text()) if cache_path.exists() else {}
@@ -223,7 +221,7 @@ def main() -> None:
     exp_provider = exp_cfg.get("provider", "auto")
     exp_model = exp_cfg.get("model")
 
-    # ---- Letterboxd history --------------------------------------------------------------
+    # Letterboxd history
     lb_config = config["letterboxd"]
     export_dir = lb_config.get("export_dir")
     watched: list = []
@@ -251,7 +249,7 @@ def main() -> None:
     if taste_vector is None:
         console.print("[yellow]No rated films found — recommendations will be based on intent only.[/yellow]")
 
-    # ---- intent --------------------------------------------------------------------------
+    # Intent
     console.rule("[bold bright_cyan]what are you after?", style="bright_black")
     references = prompt_reference_films(searcher)
     mood_text = Prompt.ask(
@@ -280,14 +278,14 @@ def main() -> None:
             "[bold]γ[/bold] [dim]0 = only mood · 1 = only reference films[/dim]", default=gamma,
         )))
 
-    # ---- query summary -------------------------------------------------------------------
+    # Query summary
     ref_titles = [
         m.title for tmdb_id, _ in references
         for m in [tmdb_client.get_metadata(tmdb_id)] if m is not None
     ]
     _print_query_summary(len(rated_films), ref_titles, mood_text, beta, has_intent, taste_vector)
 
-    # Encoding a free-text mood is the only thing that needs the embedding model — load it now.
+    # Loading the encoder now: only a free-text mood needs the embedding model.
     if mood_text:
         with console.status("[cyan]loading text encoder…", spinner="dots"):
             query_builder.embedder = EmbeddingModel(index_model_name())
@@ -299,7 +297,7 @@ def main() -> None:
     ml_rated = {tmdb_to_ml[t]: r for t, r in rated_films.items() if t in tmdb_to_ml}
     user_vector = cf_model.fold_in_user(ml_rated)
 
-    # ---- recommend -----------------------------------------------------------------------
+    # Recommend
     with console.status("[cyan]ranking films…", spinner="dots"):
         ranker = HybridRanker(film_index, cf_model, tmdb_to_ml)
         recommendations = ranker.recommend(
@@ -310,6 +308,7 @@ def main() -> None:
             candidate_pool=int(defaults.get("candidate_pool", 1000)),
             cf_retrieval=int(defaults.get("cf_retrieval", 0)),
             exploration=exploration,
+            taste_weight=1.0 - beta,
         )
     if not recommendations:
         console.print("[yellow]No recommendations found.[/yellow]")
@@ -323,7 +322,7 @@ def main() -> None:
         if avg is not None:
             avg_ratings[rec.tmdb_id] = avg
 
-    # ---- explanations (grounded in your highly-rated films) ------------------------------
+    # Explanations, grounded in highly-rated films.
     liked = {}
     for tmdb_id, rating in rated_films.items():
         if rating < 4.0:

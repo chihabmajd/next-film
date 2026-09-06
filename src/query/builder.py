@@ -11,14 +11,10 @@ class QueryBuilder:
     def build_taste_vector(
         self, rated_films: dict[int, float], dislike_weight: float = 0.5
     ) -> np.ndarray | None:
-        """Signed weighted average of film vectors, centered on your personal mean rating.
+        """Weighted average of film vectors, signed by rating minus the mean: likes pull toward,
+        dislikes push away scaled by dislike_weight since dislikes are the noisier signal.
 
         rated_films: {tmdb_id: rating}
-
-        Films above your mean pull the vector toward them; films *below* your mean push it
-        away (weighted by `dislike_weight`, since a dislike is a noisier signal than a like).
-        Rating your own average exactly contributes nothing. This is a two-sided signal — the
-        previous version discarded everything you disliked, throwing away half your ratings.
         """
         if not rated_films:
             return None
@@ -45,15 +41,11 @@ class QueryBuilder:
         n_profiles: int = 4,
         min_per_profile: int = 3,
     ) -> list[np.ndarray]:
-        """Cluster your *liked* films into a few taste centroids instead of one average.
+        """Clusters liked films into taste centroids instead of one average, since a single
+        centroid over multi-modal taste collapses into a generic mushy vector.
 
-        Your taste is multi-modal — you might love both noir and screwball comedies. A single
-        averaged vector collapses those modes into a mushy centroid that retrieves generic
-        acclaimed films. Clustering the liked films (weighted by how much you liked them) keeps
-        the modes separate, so retrieval can pull candidates for *each* facet of your taste.
-
-        Returns a list of unit vectors (one per discovered profile). Falls back to a single
-        taste vector when there aren't enough liked films to cluster.
+        Returns one unit vector per discovered profile; falls back to a single taste vector
+        when there aren't enough liked films to cluster.
         """
         if not rated_films:
             return []
@@ -73,7 +65,7 @@ class QueryBuilder:
             single = self.build_taste_vector(rated_films)
             return [single] if single is not None else []
 
-        # len(vecs) >= min_per_profile * 2 here, so k >= 2 — no single-cluster special case.
+        # len(vecs) >= min_per_profile * 2 here, so k >= 2: no single-cluster special case.
         V = np.stack(vecs)
         w = np.array(weights, dtype=np.float64)
         k = min(n_profiles, len(vecs) // min_per_profile)
@@ -150,11 +142,9 @@ class QueryBuilder:
 
     @staticmethod
     def _weighted_centroid(vectors: np.ndarray, weights) -> np.ndarray | None:
-        """Normalized weighted mean of `vectors` (rows) by `weights`.
-
-        Divides by the L1 norm of the weights, so it averages correctly whether the weights
-        are all positive (reference films, cluster members) or signed (likes minus dislikes).
-        Returns None when the weights have zero total magnitude.
+        """Normalized weighted mean of `vectors` by `weights`: divides by the L1 norm so it
+        works whether weights are all positive or signed. Returns None when weights sum to
+        zero magnitude.
         """
         w = np.asarray(weights, dtype=np.float64)
         denom = float(np.abs(w).sum())

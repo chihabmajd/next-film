@@ -22,19 +22,13 @@ class FilmMetadata:
     keywords: list[str] = field(default_factory=list)
 
     def to_text_blob(self) -> str:
-        """Text that gets embedded — deliberately front-loaded with taste-bearing fields.
+        """Text that gets embedded.
 
-        A viewer's taste tracks *director, genre and theme* far more than plot. The previous
-        blob led with a paragraph of plot, so the embedding mostly encoded what a film was
-        *about* rather than its sensibility. Here director/genre/keywords come first, the plot
-        is trimmed so it no longer dominates, and the director is mentioned twice — in a
-        mean-pooled sentence embedding, repeating a token up-weights it.
-
-        The film's own title is deliberately NOT embedded: a title is an *identifier*, not a
-        *descriptor*, so it carries no taste signal but causes lexical collisions (embedding
-        "Parasite" pulled in every unrelated film with "Parasite" in its name). Identity is
-        recovered from the tmdb_id → title map at display time, not from this text. Only a
-        coarse decade is kept, as a mild era signal.
+        Director/genre/keywords come before plot, since taste tracks those more than plot.
+        Director appears twice: a mean-pooled embedding up-weights repeated tokens.
+        Title is not embedded: it is an identifier, not a descriptor, and causes lexical
+        collisions. Identity is recovered from the tmdb_id to title map, not from this text.
+        Decade is kept as a coarse era signal.
         """
         parts: list[str] = []
         if self.director:
@@ -81,13 +75,11 @@ class TMDBClient:
         return data.get("results", [])
 
     def best_match(self, title: str, year: int | None = None) -> int | None:
-        """Resolve a (title, year) to a single TMDB id, robustly.
+        """Resolves a (title, year) to a TMDB id.
 
-        The old code took `search(...)[0]` blindly, which silently picked remakes, shorts,
-        same-name documentaries, or the wrong-year edition — corrupting both the taste vector
-        and the "already watched" filter. This scores candidates on exact-title match, year
-        proximity (Letterboxd's year can be off by one vs TMDB's release date), and popularity
-        as a tiebreak, and retries without the year filter when a year-constrained search is empty.
+        Scores candidates on exact-title match, year proximity (Letterboxd's year can differ
+        by one from TMDB's release date), and popularity as a tiebreak. Retries without the
+        year filter if a year-constrained search returns nothing.
         """
         results = self.search(title, year)
         if not results and year:

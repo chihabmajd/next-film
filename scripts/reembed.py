@@ -1,9 +1,8 @@
-"""Rebuild the FAISS content index for the films already in it — new model + new text blob.
+"""Rebuilds the FAISS content index for films already in it, with a new model or text blob.
 
-Unlike setup.py, this does NOT touch MovieLens/Letterboxd resolution or the SVD model. It
-re-embeds the exact set of films currently in data/index/films_ids.npy, reading their metadata
-from the TMDB cache (no network), re-merging MovieLens tags, and rebuilding the index with the
-embedding model from config.yaml. The previous index is backed up so the change is reversible.
+Does not touch MovieLens/Letterboxd resolution or the SVD model. Re-embeds the films in
+data/index/films_ids.npy from the cached TMDB metadata (no network), re-merging MovieLens
+tags. The previous index is backed up.
 
 Run after changing the embedding model or FilmMetadata.to_text_blob():
 

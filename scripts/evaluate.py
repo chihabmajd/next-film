@@ -1,23 +1,7 @@
-"""Offline evaluation: does the recommender rank the films you actually liked near the top?
+"""Leave-N-out evaluation: repeatedly hides a random holdout of liked films, ranks the rest,
+and checks where the held-out films land.
 
-Leave-N-out protocol. From your Letterboxd likes we repeatedly hide a random handful, build
-taste from everything else, rank all unwatched candidates, and check where the hidden films
-land. This turns "these picks feel mediocre" into numbers, so ranking changes can be compared
-instead of eyeballed.
-
-    python scripts/evaluate.py                       # compare a preset sweep on the current index
-    python scripts/evaluate.py --reps 12 --holdout 15
-    python scripts/evaluate.py --index-dir data/index/backup-YYYYMMDD-HHMMSS   # A/B a different index
-
-Metrics (higher is better), averaged over reps × held-out films:
-  recall@K — fraction of held-out likes that appear in the top K
-  MRR      — mean reciprocal rank (1/position of each held-out like; 0 if it never appears)
-
-Notes:
-  * Pure-taste evaluation (no mood text), so it needs no embedding model loaded — it reads
-    vectors straight from the index. Fast.
-  * MMR diversity is forced off here: we're measuring relevance ranking, and diversity
-    deliberately trades relevance for variety, which would muddy the metric.
+Metrics: recall@K (fraction of held-out likes in the top K) and MRR (mean reciprocal rank).
 """
 
 import argparse
@@ -45,7 +29,7 @@ KS = (10, 20, 50)
 
 
 def load_rated() -> dict[int, float]:
-    """Your Letterboxd ratings, mapped to TMDB ids via the cached resolution."""
+    """Letterboxd ratings mapped to TMDB ids via the cached resolution."""
     resolved = json.loads((INDEX_DIR / "lb_resolved.json").read_text())
     rated: dict[int, float] = {}
     with open(ROOT / "letterboxd-export" / "ratings.csv") as f:
@@ -80,9 +64,9 @@ def build_folds(
     n_profiles: int,
     seed: int,
 ) -> list[tuple[list[int], "np.ndarray", list, "np.ndarray"]]:
-    """Precompute the hold-out folds ONCE. taste/profiles/user-vector depend only on the
-    train split, not on the ranking config, so building them here avoids recomputing them
-    for every preset config (they were rebuilt 6× before)."""
+    """Precomputes hold-out folds once: taste, profiles and user-vector depend only on the
+    train split, not the ranking config, so they're built once per fold rather than once
+    per config."""
     qb = QueryBuilder(embedder=None, film_index=fi)  # taste needs no text encoder
     rng = random.Random(seed)
     folds = []
@@ -146,8 +130,8 @@ def main() -> None:
     tmdb_to_ml = {int(k): v for k, v in json.loads((INDEX_DIR / "tmdb_to_ml.json").read_text()).items()}
 
     rated = load_rated()
-    # Only hold out likes that are actually in this index — otherwise we'd be measuring
-    # resolution gaps, not ranking, and it would penalize every config identically.
+    # Only hold out likes present in this index; otherwise the metric would measure
+    # resolution gaps, not ranking.
     likeable = [t for t, r in rated.items() if r >= args.like_threshold and fi.has(t)]
     console.print(
         f"Index: [cyan]{index_dir.name}[/cyan] (dim={fi.index.d}) | "

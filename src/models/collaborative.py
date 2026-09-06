@@ -34,9 +34,7 @@ class CollaborativeModel:
 
         self.global_mean = float(ratings_df["rating"].mean())
 
-        # Confidence weighting: popular films get amplified signal in the matrix.
-        # log(1 + count) is the standard choice — grows fast at first, flattens out.
-        # Normalized by the median so a median-popularity film has confidence=1.
+        # Confidence = log1p(count) / median, so a median-popularity film weighs 1.
         count_map = ratings_df.groupby("movieId")["rating"].count()
         self.movie_rating_counts = {
             str(k): int(v)
@@ -97,7 +95,7 @@ class CollaborativeModel:
         return MODEL_PATH.exists()
 
     def fold_in_user(self, user_ratings: dict[int, float]) -> np.ndarray:
-        """Project a new user into the SVD latent space via confidence-weighted fold-in.
+        """Confidence-weighted fold-in: projects a new user into the SVD latent space.
 
         user_ratings: {movielens_movie_id (int): rating}
         Returns a k-dimensional user vector.
@@ -125,7 +123,6 @@ class CollaborativeModel:
         return u.astype(np.float32)
 
     def score_films(self, user_vector: np.ndarray, ml_movie_ids: list[int]) -> dict[int, float]:
-        """Score a list of MovieLens movie IDs for a given user vector."""
         assert self.item_factors is not None, "Model not loaded"
         scores = {}
         for ml_id in ml_movie_ids:
@@ -135,12 +132,8 @@ class CollaborativeModel:
         return scores
 
     def top_items(self, user_vector: np.ndarray, m: int) -> list[str]:
-        """The m films this user vector scores highest across the *entire* catalog.
-
-        This is a collaborative retrieval channel: it finds films that people with your rating
-        pattern love, regardless of whether they resemble your films in content-embedding space.
-        Content retrieval can only surface films near yours in style/topic; this surfaces films
-        near yours in *taste* — the cross-genre correlations embeddings can't see.
+        """The m films this user vector scores highest across the whole catalog: collaborative
+        retrieval, surfacing cross-genre taste correlations that content embeddings miss.
         """
         assert self.item_factors is not None, "Model not loaded"
         scores = self.item_factors @ user_vector  # (n_items,)
@@ -152,10 +145,7 @@ class CollaborativeModel:
         return [self.movie_raw_ids[i] for i in idx]
 
     def popularity(self, ml_id: int) -> float:
-        """How mainstream a film is, in [0, 1] — log rating count normalized by the most-rated film.
-
-        Used by the ranker to *penalize* popularity so obvious blockbusters don't dominate.
-        """
+        """How mainstream a film is, in [0, 1], from its log rating count."""
         count = self.movie_rating_counts.get(str(ml_id), 0)
         if count <= 0:
             return 0.0

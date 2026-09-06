@@ -15,7 +15,7 @@ class WatchedFilm:
 
 
 def fetch_watched(username: str) -> list[WatchedFilm]:
-    """Fetch via Letterboxd RSS — returns only the ~50 most recent diary entries."""
+    """Fetch via Letterboxd RSS; returns only the ~50 most recent diary entries."""
     url = f"https://letterboxd.com/{username}/rss/"
     response = requests.get(url, timeout=15)
     response.raise_for_status()
@@ -23,11 +23,11 @@ def fetch_watched(username: str) -> list[WatchedFilm]:
 
 
 def load_from_export(export_dir: str | Path) -> list[WatchedFilm]:
-    """Load full watch history from a Letterboxd CSV export directory.
+    """Loads full watch history from a Letterboxd CSV export directory.
 
-    Download your export at letterboxd.com → Settings → Data → Export Your Data.
-    The zip contains ratings.csv (rated films) and watched.csv (all watched films).
-    Both are read and merged; ratings.csv takes precedence for rating values.
+    Export at letterboxd.com > Settings > Data > Export Your Data: the zip contains
+    ratings.csv (rated films) and watched.csv (all watched films), merged with
+    ratings.csv taking precedence for rating values.
     """
     export_dir = Path(export_dir)
     ratings_path = export_dir / "ratings.csv"

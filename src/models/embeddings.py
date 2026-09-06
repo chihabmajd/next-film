@@ -1,8 +1,7 @@
 import os
 from pathlib import Path
 
-# Quiet the Hugging Face / transformers chatter (progress bars, load reports, token nags)
-# before anything imports them — it otherwise dumps a "MODEL LOAD REPORT" table into the CLI.
+# Silence transformers logging before import, else it prints a load-report table.
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
@@ -20,10 +19,8 @@ from sentence_transformers import SentenceTransformer
 
 INDEX_DIR = Path(__file__).parent.parent.parent / "data" / "index"
 
-# all-mpnet-base-v2: 768-dim, stronger and more recent than the old all-MiniLM-L6-v2 (384-dim).
-# The higher dimensionality resolves finer distinctions between films that MiniLM squashed
-# together. The model the index was built with is persisted to embedding_model.txt so the
-# query-time encoder always matches — mismatching the model makes the geometry meaningless.
+# The building model is persisted to embedding_model.txt: a mismatched encoder
+# makes the geometry meaningless.
 DEFAULT_MODEL = "sentence-transformers/all-mpnet-base-v2"
 MODEL_FILE = INDEX_DIR / "embedding_model.txt"
 
@@ -112,10 +109,9 @@ class FilmIndex:
         return vec
 
     def get_vectors(self, tmdb_ids: list[int]) -> tuple[np.ndarray, list[int]]:
-        """Reconstruct many vectors at once into a single (N, d) matrix.
+        """Reconstruct vectors into one (N, d) matrix.
 
-        Returns (matrix, kept_ids) where kept_ids drops any id not in the index, in order.
-        Callers can then score with one matmul instead of a Python loop of dot products.
+        Returns (matrix, kept_ids), in order, with ids absent from the index dropped.
         """
         assert self.index is not None, "Index not loaded"
         positions, kept = [], []
@@ -137,11 +133,7 @@ def embed_and_index(
     texts: list[str],
     batch_size: int = 256,
 ) -> None:
-    """Encode `texts` in batches, build the FAISS index over `ids`, and save it.
-
-    Shared by scripts/setup.py and scripts/reembed.py so the batch size and the
-    encode → vstack → build → save contract live in exactly one place.
-    """
+    """Encode `texts` in batches, build the index and save it."""
     from rich.progress import track
 
     vecs = [

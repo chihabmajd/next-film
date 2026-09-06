@@ -15,13 +15,10 @@ class Recommendation:
     popularity: float            # how mainstream the film is, in [0, 1]
 
 
-# Default blend. Content relevance leads; CF is a supporting "people like you" nudge;
-# popularity is subtracted so obvious blockbusters don't dominate a cinephile's list.
+# Content dominates the blend; CF adds a smaller taste nudge; popularity is subtracted.
 DEFAULT_WEIGHTS = {"content": 1.0, "cf": 0.6, "popularity": 0.15}
 
-# Standardized signals are clipped to ±this many standard deviations before blending. CF
-# scores are heavy-tailed — without clipping, one outlier film gets a z-score of ~20 and
-# swamps content relevance and the popularity penalty, re-creating the mainstream bias.
+# CF z-scores are heavy-tailed; clip to ±2.5σ so one outlier doesn't swamp content and popularity.
 CLIP = 2.5
 
 
@@ -48,19 +45,18 @@ class HybridRanker:
         candidate_pool: int = 1000,
         cf_retrieval: int = 0,
         exploration: float = 0.0,
+        taste_weight: float = 1.0,
     ) -> list[Recommendation]:
+        """taste_weight (= 1 − β) scales the CF weight and the profile retrieval breadth."""
         w = {**DEFAULT_WEIGHTS, **(weights or {})}
+        taste_weight = max(0.0, min(1.0, taste_weight))
+        w["cf"] = w["cf"] * taste_weight
 
         if exploration > 0.0:
             query_vector = self._jitter(query_vector, exploration)
 
-        # ---- Stage 1: candidate generation ----------------------------------------------
-        # Three retrieval channels, unioned:
-        #   (a) the query vector — content relevance to taste+intent,
-        #   (b) each taste profile — widens recall across the facets of your taste,
-        #   (c) collaborative — films people with your rating pattern love, which content
-        #       retrieval structurally misses (they can sit far away in embedding space).
-        # Content still governs relevance at scoring time, so off-taste CF candidates score low.
+        # Stage 1: candidate generation via query vector, taste profiles, and CF retrieval.
+        # Content still scores relevance at ranking time, so off-taste CF candidates rank low.
         candidates: list[int] = []
         seen: set[int] = set()
 
@@ -72,8 +68,10 @@ class HybridRanker:
                 candidates.append(tmdb_id)
 
         add_ids(t for t, _ in self.film_index.search(query_vector, k=candidate_pool + len(watched_tmdb_ids)))
-        for profile in taste_profiles or []:
-            add_ids(t for t, _ in self.film_index.search(profile, k=candidate_pool // 3))
+        profile_k = int(candidate_pool // 3 * taste_weight)
+        if profile_k > 0:
+            for profile in taste_profiles or []:
+                add_ids(t for t, _ in self.film_index.search(profile, k=profile_k))
         if cf_retrieval > 0 and np.any(user_vector):
             add_ids(
                 tmdb for ml_raw in self.cf_model.top_items(user_vector, cf_retrieval)
@@ -83,20 +81,16 @@ class HybridRanker:
         if not candidates:
             return []
 
-        # Content similarity of every candidate against the query vector: one batched
-        # reconstruct + a single matmul, rather than a reconstruct/dot per candidate.
-        # get_vectors also drops any id not in the index (CF retrieval can surface some).
+        # One reconstruct + matmul; get_vectors drops ids absent from the index.
         V, candidates = self.film_index.get_vectors(candidates)
         if not candidates:
             return []
-        content_arr = V @ query_vector  # (N,) cosine — both sides are unit-normalized
+        content_arr = V @ query_vector  # (N,) cosine, both sides are unit-normalized
         vecs = {tid: V[i] for i, tid in enumerate(candidates)}
 
-        # ---- Stage 2: debiased collaborative-filtering signal ---------------------------
-        # Raw CF scores carry a popularity offset (well-loved films score high for everyone).
-        # We z-score CF *within the candidate set*, which removes that offset and turns CF into
-        # a relative "more/less for you than the pool average" signal. Films outside MovieLens
-        # get cf_z = None and contribute 0 to the blend — they compete on content, not buried.
+        # Stage 2: debiased CF signal.
+        # z-score CF within the candidate set to remove the popularity offset.
+        # Films outside MovieLens get None and contribute 0.
         cf_z: dict[int, float] = {}
         if np.any(user_vector):
             ml_of = {c: self.tmdb_to_ml[c] for c in candidates if c in self.tmdb_to_ml}
@@ -108,8 +102,8 @@ class HybridRanker:
                     if ml_id in raw:
                         cf_z[tmdb_id] = (raw[ml_id] - mean) / std
 
-        # ---- Stage 3: blend -------------------------------------------------------------
-        # Put content on the same scale as cf_z by z-scoring it across the candidate pool.
+        # Stage 3: blend.
+        # z-score content across the candidate pool to match cf_z's scale.
         c_mean = float(content_arr.mean())
         c_std = float(content_arr.std()) or 1.0
 
@@ -138,9 +132,7 @@ class HybridRanker:
 
         scored.sort(key=lambda r: r.score, reverse=True)
 
-        # ---- Stage 4: diversify (MMR) ---------------------------------------------------
-        # Re-rank the top slice so we don't return five near-identical films (same director,
-        # same franchise). Each pick trades its score against similarity to already-picked films.
+        # Stage 4: MMR. Each pick trades score against similarity to those already picked.
         shortlist = scored[: max(top_n * 6, top_n)]
         return self._mmr(shortlist, vecs, diversity, top_n)
 
@@ -170,8 +162,7 @@ class HybridRanker:
 
         pool = list(recs)
         selected: list[Recommendation] = []
-        # Running max cosine similarity of each pool item to the already-selected set,
-        # updated against only the newest pick each round (not recomputed from scratch).
+        # Running max similarity to the selected set, updated incrementally.
         max_sim = {r.tmdb_id: 0.0 for r in recs}
         while pool and len(selected) < top_n:
             pick = max(pool, key=lambda r: norm[r.tmdb_id] - diversity * max_sim[r.tmdb_id])

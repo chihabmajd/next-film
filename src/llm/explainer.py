@@ -1,13 +1,8 @@
 """Explanations for why each film was recommended.
 
-Two backends:
-  * "heuristic" (default) — data-driven, instant, no dependencies. It grounds each pick in
-    *your* history: the film you love it's closest to, what they share (director / themes /
-    register), the collaborative signal, and mood overlap. Always available.
-  * "ollama" — a local LLM writes the blurb, used only when an Ollama server is actually
-    reachable. Never silently swallowed: if it's unreachable we say so and fall back.
-
-Provider "auto" uses Ollama when reachable, otherwise the heuristic.
+Backends: "heuristic" (default, grounded in liked-film history, always available) and
+"ollama" (local LLM, used only when reachable; falls back to heuristic otherwise).
+Provider "auto" picks Ollama when reachable.
 """
 
 from __future__ import annotations
@@ -20,7 +15,7 @@ from src.enrichment.tmdb import FilmMetadata
 
 
 def ollama_available(host: str = "http://localhost:11434", timeout: float = 0.6) -> tuple[bool, list[str]]:
-    """Return (reachable, [model names]) without importing or blocking for long."""
+    """Returns (reachable, model names)."""
     try:
         with urllib.request.urlopen(f"{host}/api/tags", timeout=timeout) as r:
             import json
@@ -44,10 +39,7 @@ class Explainer:
         model: str | None = None,
         liked: dict[int, tuple[FilmMetadata, float, np.ndarray]] | None = None,
     ) -> None:
-        """
-        liked: {tmdb_id: (metadata, your_rating, embedding_vector)} for films you rated highly —
-               the material the heuristic explainer grounds its reasons in.
-        """
+        """liked: {tmdb_id: (metadata, rating, embedding_vector)} for highly-rated films."""
         self.provider = provider
         self.model = model
         self._ollama = None
@@ -68,7 +60,7 @@ class Explainer:
             elif provider == "ollama":
                 self.requested_but_unavailable = True
 
-    # ---- public -------------------------------------------------------------------------
+    # Public
     def explain(self, film: FilmMetadata, vec: np.ndarray | None, mood_text: str | None) -> str:
         if self.active == "ollama":
             out = self._ollama_explain(film, mood_text)
@@ -76,7 +68,7 @@ class Explainer:
                 return out
         return self._heuristic_explain(film, vec, mood_text)
 
-    # ---- heuristic ----------------------------------------------------------------------
+    # Heuristic
     def _heuristic_explain(self, film: FilmMetadata, vec: np.ndarray | None, mood_text: str | None) -> str:
         anchor = self._closest_liked(vec)
         bits: list[str] = []
@@ -134,7 +126,7 @@ class Explainer:
                 hits.append(kw)
         return hits
 
-    # ---- ollama -------------------------------------------------------------------------
+    # Ollama
     def _ollama_explain(self, film: FilmMetadata, mood_text: str | None) -> str | None:
         try:
             if self._ollama is None:

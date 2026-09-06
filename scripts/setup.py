@@ -61,11 +61,8 @@ def build_tmdb_mapping(tmdb_client: TMDBClient) -> dict[int, int]:
 
 
 def load_movielens_base_metadata(ml_to_tmdb: dict[int, int]) -> dict[int, FilmMetadata]:
-    """Build basic FilmMetadata from movies.csv — no API calls.
-
-    Gives every film a title, year, and genres immediately. Used as fallback
-    for films where the TMDB fetch fails so they still get embedded.
-    """
+    """Builds basic FilmMetadata from movies.csv (no API calls); used as a fallback when
+    the TMDB fetch fails."""
     movies = pd.read_csv(MOVIELENS_DIR / "movies.csv")
     ml_ids: list[Any] = movies["movieId"].tolist()
     raw_titles: list[Any] = movies["title"].tolist()
@@ -99,11 +96,10 @@ def _parse_ml_title(raw: str) -> tuple[str, int]:
 
 
 def load_movielens_tags(ml_to_tmdb: dict[int, int], top_n: int = 10) -> dict[int, list[str]]:
-    """Aggregate the most-applied user tags per film from tags.csv.
+    """Aggregates the most-applied user tags per film from tags.csv.
 
-    These semantic labels ("atmospheric", "thought-provoking", "based on a book")
-    are merged into film keywords before embedding to enrich content vectors,
-    especially for films with sparse TMDB metadata.
+    Merged into film keywords before embedding, to enrich content vectors especially
+    for films with sparse TMDB metadata.
     """
     console.print("Loading tags.csv...")
     tags_df = pd.read_csv(MOVIELENS_DIR / "tags.csv", usecols=["movieId", "tag"])
@@ -132,11 +128,8 @@ def fetch_tmdb_metadata(
     tmdb_ids: list[int],
     base_metadata: dict[int, FilmMetadata],
 ) -> dict[int, FilmMetadata]:
-    """Fetch rich metadata from TMDB (plot, director, cast, keywords).
-
-    Films where TMDB fails fall back to base_metadata so they still get
-    embedded with at least title + year + genres from movies.csv.
-    """
+    """Fetches rich metadata from TMDB (plot, director, cast, keywords); films where it fails
+    fall back to base_metadata (title, year, genres from movies.csv)."""
     console.print(f"Fetching TMDB metadata for {len(tmdb_ids):,} films...")
     tmdb_results = tmdb_client.get_metadata_batch(tmdb_ids)
     merged = {**base_metadata, **tmdb_results}  # TMDB overwrites base where available
@@ -219,21 +212,14 @@ def main() -> None:
     tmdb_client = TMDBClient(api_key)
     ml_to_tmdb = build_tmdb_mapping(tmdb_client)
 
-    # Base metadata from movies.csv — instant, no API calls
     base_metadata = load_movielens_base_metadata(ml_to_tmdb)
-
-    # User-applied semantic tags from tags.csv
     ml_tags = load_movielens_tags(ml_to_tmdb)
 
-    # Add Letterboxd films (may not be in MovieLens)
     lb_tmdb_ids = fetch_letterboxd_tmdb_ids(tmdb_client, config)
     all_tmdb_ids = list(set(base_metadata.keys()) | set(lb_tmdb_ids))
     console.print(f"Total films to embed: {len(all_tmdb_ids):,}")
 
-    # Enrich with TMDB (plot, director, cast, keywords); fall back to base where TMDB fails
     metadata = fetch_tmdb_metadata(tmdb_client, all_tmdb_ids, base_metadata)
-
-    # Merge user tags into keywords for richer embeddings
     _merge_tags(metadata, ml_tags)
 
     model_name = config.get("content", {}).get("model")
@@ -244,11 +230,9 @@ def main() -> None:
     cf_model = CollaborativeModel()
     train_svd(cf_model)
 
-    # Save tmdb→ml reverse map for the ranker
     tmdb_to_ml = {v: k for k, v in ml_to_tmdb.items()}
     (INDEX_DIR / "tmdb_to_ml.json").write_text(json.dumps({str(k): v for k, v in tmdb_to_ml.items()}))
 
-    # Save title lookup for rapidfuzz fallback in film search
     titles = {str(tid): f"{m.title} ({m.year})" for tid, m in metadata.items()}
     (INDEX_DIR / "film_titles.json").write_text(json.dumps(titles))
 
