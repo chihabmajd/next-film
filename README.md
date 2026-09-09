@@ -80,39 +80,6 @@ full history, export your data (Settings → Data → Export) and set `letterbox
 | `content.model` | `all-mpnet-base-v2` | Changing this requires `scripts/reembed.py` |
 | `explanations.provider` | `auto` | `auto`, `heuristic`, or `ollama` |
 
-## Evaluation, and why its numbers do not mean much
-
-`scripts/evaluate.py` runs a leave-N-out protocol: hide a random handful of liked films,
-rebuild taste from the rest, rank all unwatched candidates, measure recall@K and MRR.
-
-```
-rated=154 | likes>=4.0 in index=53 | holdout=12 x 10 folds
-
-config                          recall@10  recall@20  recall@50    MRR
-OLD (no cf-retrieval)               0.033      0.050      0.133    0.012
-new default (+cf-retrieval)         0.017      0.025      0.067    0.013
-cf-retrieval 2000                   0.025      0.042      0.092    0.015
-cf-retrieval only (content0)        0.000      0.008      0.042    0.003
-pop off                             0.025      0.058      0.083    0.014
-no profiles                         0.017      0.025      0.067    0.012
-```
-
-**This table does not separate the configurations.** The mean is over 120 observations
-(10 folds × 12 held-out films), so `recall@10 = 0.033` means four films found and
-`0.017` means two. The binomial standard error at n=120 and p≈0.03 is about 1.6 points,
-larger than every gap in the table. Three limitations compound:
-
-- **One user.** All 53 likes come from a single Letterboxd history, and the folds overlap
-  heavily, so the observations are neither numerous nor independent.
-- **Random split, not temporal.** MovieLens carries timestamps; this protocol ignores
-  them and can build taste from films watched after the held-out ones.
-- **Popularity bias is unmeasured.** The blend penalizes popularity, but nothing here
-  checks the popularity distribution of what is actually recommended.
-
-No ranking change should be justified by this table as it stands. Making it meaningful
-means evaluating on MovieLens users with a global temporal split, which would also allow
-NDCG and MAP with confidence intervals. Until then, treat the output as qualitative.
-
 ## Limitations
 
 - MovieLens 32M covers 87,585 films to October 2023. Later releases are ranked on
